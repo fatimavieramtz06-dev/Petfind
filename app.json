@@ -1,0 +1,50 @@
+{
+  "expo": {
+    "name": "PetFind",
+    "slug": "petfind",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/logo-completo.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "PetFind usa la cámara para tomar la foto de la mascota y escanearla.",
+        "NSPhotoLibraryUsageDescription": "PetFind necesita tus fotos para elegir la imagen de la mascota.",
+        "NSLocationWhenInUseUsageDescription": "PetFind usa tu ubicación para marcar dónde se perdió o se encontró una mascota."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "permissions": ["CAMERA", "ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "PetFind necesita tus fotos para elegir la imagen de la mascota.",
+          "cameraPermission": "PetFind usa la cámara para tomar la foto de la mascota."
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "PetFind usa tu ubicación para marcar dónde se perdió o se encontró una mascota."
+        }
+      ]
+    ]
+  }
+}
