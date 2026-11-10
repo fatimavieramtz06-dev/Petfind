@@ -393,7 +393,7 @@ const NOTIFICAR_URL = 'https://petfind-backend.vercel.app/api/notificar';
 const REENCUENTRO_URL = 'https://petfind-backend.vercel.app/api/reencuentro';
 
 // Correo del equipo para ejercer derechos sobre los datos (escríbelo aquí; si queda vacío no se muestra)
-const CORREO_PRIVACIDAD = '';
+const CORREO_PRIVACIDAD = 'petfind.contacto@gmail.com';
 
 const AVISO_PRIVACIDAD: { t: string; x: string }[] = [
   {
