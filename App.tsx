@@ -658,6 +658,15 @@ export default function App() {
   const [pasoGuia, setPasoGuia] = useState<number>(0);
   const [notificaciones, setNotificaciones] = useState<Notificacion[]>([]);
   const [notifVisible, setNotifVisible] = useState<boolean>(false);
+  const [perfilVisible, setPerfilVisible] = useState(false);
+  const [pestanaPerfil, setPestanaPerfil] = useState<'activos' | 'resueltos' | 'vencidos'>('activos');
+  const uidPerfil = auth.currentUser?.uid;
+  const misReportes = uidPerfil ? reportes.filter((r) => r.autorId === uidPerfil) : [];
+  const gruposPerfil = {
+    activos: misReportes.filter((r) => r.estado !== 'Reunida' && r.estado !== 'Vencida'),
+    resueltos: misReportes.filter((r) => r.estado === 'Reunida'),
+    vencidos: misReportes.filter((r) => r.estado === 'Vencida'),
+  };
   const [privacidadVisible, setPrivacidadVisible] = useState<boolean>(false);
   const [aceptaPrivacidad, setAceptaPrivacidad] = useState<boolean>(false);
 
@@ -1026,6 +1035,8 @@ export default function App() {
     // Limpiar los datos de la sesión desde la acción de salir.
     setNotificaciones([]);
     setNotifVisible(false);
+    setPerfilVisible(false);
+    setPestanaPerfil('activos');
     setReportes([]);
     setCargandoReportes(true);
     setSesionIniciada(false);
@@ -1720,8 +1731,8 @@ export default function App() {
               <Ico n="help-circle-outline" s={21} c="#555" />
             </TouchableOpacity>
           )}
-          <TouchableOpacity style={styles.navbarBotonSalir} onPress={handleLogout}>
-            <Text style={styles.navbarBotonSalirTexto}>Salir</Text>
+          <TouchableOpacity style={styles.navbarIconoBoton} onPress={() => setPerfilVisible(true)} accessibilityRole="button" accessibilityLabel="Abrir mi perfil">
+            <Ico n="person-circle-outline" s={26} c={PRIMARY_DARK} />
           </TouchableOpacity>
         </View>
       </View>
@@ -2081,6 +2092,82 @@ export default function App() {
                 <Text style={styles.textoBlanco}>{esUltimoPaso ? 'Empezar' : 'Siguiente'}</Text>
               </TouchableOpacity>
             </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Perfil de la cuenta: usa siempre el UID de la sesión actual. */}
+      <Modal visible={perfilVisible} transparent animationType="slide" onRequestClose={() => setPerfilVisible(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.perfilPanel}>
+            <View style={styles.perfilCabecera}>
+              <Text style={[styles.modalTitulo, { marginBottom: 0 }]}>Mi perfil</Text>
+              <TouchableOpacity style={styles.formularioCerrar} onPress={() => setPerfilVisible(false)} accessibilityRole="button" accessibilityLabel="Cerrar mi perfil">
+                <Ico n="close" s={24} c="#333" />
+              </TouchableOpacity>
+            </View>
+            <ScrollView contentContainerStyle={{ padding: 18 }}>
+              <View style={styles.perfilCuenta}>
+                <Ico n="person-circle-outline" s={48} c={PRIMARY_DARK} />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.perfilNombre}>Tu cuenta PetFind</Text>
+                  <Text selectable style={styles.perfilTexto}>{auth.currentUser?.email || email}</Text>
+                </View>
+              </View>
+              <Text style={styles.perfilNombre}>Mis reportes</Text>
+              <Text style={[styles.perfilTexto, { marginTop: 4, marginBottom: 14 }]}>Aquí puedes administrar los reportes que publicaste con esta cuenta.</Text>
+              <View style={styles.perfilPestanas}>
+                {(['activos', 'resueltos', 'vencidos'] as const).map((pestana) => (
+                  <TouchableOpacity key={pestana} accessibilityRole="tab" accessibilityState={{ selected: pestanaPerfil === pestana }} onPress={() => setPestanaPerfil(pestana)} style={[styles.perfilPestana, pestanaPerfil === pestana && styles.perfilPestanaActiva]}>
+                    <Text style={{ color: pestanaPerfil === pestana ? '#fff' : PRIMARY_DARK, fontWeight: '700', textAlign: 'center', fontSize: 13 }}>
+                      {pestana === 'activos' ? 'Activos' : pestana === 'resueltos' ? 'Resueltos' : 'Vencidos'} ({gruposPerfil[pestana].length})
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              {cargandoReportes ? (
+                <ActivityIndicator color={PRIMARY_DARK} style={{ marginVertical: 28 }} accessibilityLabel="Cargando mis reportes" />
+              ) : gruposPerfil[pestanaPerfil].length === 0 ? (
+                <View style={styles.perfilVacio}>
+                  <Ico n="document-text-outline" s={36} c="#78877f" />
+                  <Text style={[styles.perfilNombre, { marginTop: 10 }]}>No tienes reportes {pestanaPerfil}</Text>
+                  <Text style={[styles.perfilTexto, { textAlign: 'center', marginTop: 6 }]}>Los reportes de esta categoría aparecerán aquí.</Text>
+                </View>
+              ) : gruposPerfil[pestanaPerfil].map((r) => (
+                <View key={r.id} style={styles.perfilReporte}>
+                  <View style={{ flexDirection: 'row', gap: 12 }}>
+                    {r.foto ? <Image source={{ uri: r.foto }} style={{ width: 72, height: 82, borderRadius: 10, backgroundColor: '#edf2ef' }} resizeMode="contain" accessibilityLabel={`Foto de ${r.nombre}`} /> : null}
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.perfilNombre}>{r.nombre || 'Mascota sin nombre'}</Text>
+                      <Text style={[styles.perfilTexto, { color: PRIMARY_DARK, marginTop: 3 }]}>{r.tipo === 'Perdida' ? 'Mascota perdida' : 'Mascota encontrada'} · {r.estado === 'Reunida' ? 'Resuelto' : r.estado === 'Vencida' ? 'Vencido' : 'Activo'}</Text>
+                      <Text style={[styles.perfilTexto, { marginTop: 4 }]}>{r.ubicacion}</Text>
+                    </View>
+                  </View>
+                  <View style={styles.perfilAcciones}>
+                    <TouchableOpacity style={styles.perfilAccion} accessibilityRole="button" accessibilityLabel={`Ver reporte de ${r.nombre}`} onPress={() => { setPerfilVisible(false); setTimeout(() => abrirDetalle(r), Platform.OS === 'ios' ? 450 : 0); }}>
+                      <Text style={styles.perfilAccionTexto}>Ver reporte</Text>
+                    </TouchableOpacity>
+                    {r.estado !== 'Reunida' && r.estado !== 'Vencida' && (
+                      <TouchableOpacity style={styles.perfilAccion} accessibilityRole="button" accessibilityLabel={`Editar reporte de ${r.nombre}`} onPress={() => { setPerfilVisible(false); setTimeout(() => abrirEdicion(r), Platform.OS === 'ios' ? 450 : 0); }}>
+                        <Text style={styles.perfilAccionTexto}>Editar</Text>
+                      </TouchableOpacity>
+                    )}
+                    <TouchableOpacity style={styles.perfilAccion} accessibilityRole="button" accessibilityLabel={`Eliminar reporte de ${r.nombre}`} onPress={() => eliminarReporte(r)}>
+                      <Text style={[styles.perfilAccionTexto, { color: '#b42318' }]}>Eliminar</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ))}
+              <Text style={[styles.perfilTexto, { fontSize: 12, marginTop: 4, marginBottom: 18 }]}>Este listado no es un historial permanente. Los reportes resueltos se borran a los 30 días; los activos pasan a vencidos a los 90 días.</Text>
+              <TouchableOpacity style={styles.perfilEnlace} accessibilityRole="button" onPress={() => { setPerfilVisible(false); setTimeout(() => setPrivacidadVisible(true), Platform.OS === 'ios' ? 450 : 0); }}>
+                <Ico n="shield-checkmark-outline" s={21} c={PRIMARY_DARK} />
+                <Text style={styles.perfilAccionTexto}>Aviso de privacidad y contacto</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.perfilEnlace, { marginTop: 10 }]} accessibilityRole="button" onPress={handleLogout}>
+                <Ico n="log-out-outline" s={21} c="#b42318" />
+                <Text style={[styles.perfilAccionTexto, { color: '#b42318' }]}>Cerrar sesión</Text>
+              </TouchableOpacity>
+            </ScrollView>
           </View>
         </View>
       </Modal>
@@ -2964,6 +3051,21 @@ const styles = StyleSheet.create({
   leyendaItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   leyendaDot: { width: 10, height: 10, borderRadius: 5 },
   leyendaTexto: { fontSize: 12, color: '#666' },
+
+  perfilPanel: { backgroundColor: '#fff', borderRadius: 16, width: '100%', maxWidth: 640, maxHeight: '92%', flexShrink: 1, overflow: 'hidden' },
+  perfilCabecera: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 16, borderBottomWidth: 1, borderBottomColor: '#e5ebe7' },
+  perfilCuenta: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, backgroundColor: '#edf6f0', borderRadius: 12, marginBottom: 22 },
+  perfilNombre: { fontSize: 17, fontWeight: '700', color: '#22372b' },
+  perfilTexto: { fontSize: 14, lineHeight: 21, color: '#59645d' },
+  perfilPestanas: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 14 },
+  perfilPestana: { flexGrow: 1, paddingHorizontal: 10, paddingVertical: 13, borderRadius: 10, backgroundColor: '#edf3ef' },
+  perfilPestanaActiva: { backgroundColor: PRIMARY_DARK },
+  perfilVacio: { alignItems: 'center', paddingVertical: 28, paddingHorizontal: 10 },
+  perfilReporte: { borderWidth: 1, borderColor: '#e1e8e3', borderRadius: 12, padding: 12, marginBottom: 12 },
+  perfilAcciones: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 },
+  perfilAccion: { paddingHorizontal: 12, paddingVertical: 12, backgroundColor: '#f2f5f3', borderRadius: 8 },
+  perfilAccionTexto: { fontSize: 14, fontWeight: '700', color: PRIMARY_DARK },
+  perfilEnlace: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 14, borderWidth: 1, borderColor: '#dfe7e2', borderRadius: 10 },
 
   // Modales (reutilizados)
   modalOverlay: {
