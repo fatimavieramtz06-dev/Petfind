@@ -707,6 +707,7 @@ export default function App() {
   const [coincidencias, setCoincidencias] = useState<Coincidencia[]>([]);
   const [resultadosVisible, setResultadosVisible] = useState<boolean>(false);
   const [comparados, setComparados] = useState<number | null>(null);
+  const [estadoImagenEscaner, setEstadoImagenEscaner] = useState<'mascota' | 'sin_mascota' | 'no_clara' | null>(null);
   const [fotoLocal, setFotoLocal] = useState<string | null>(null);
   const [subiendo, setSubiendo] = useState<boolean>(false);
 
@@ -1345,11 +1346,9 @@ export default function App() {
     });
     if (resultado.canceled) return;
 
-    if (reportesActivos.length === 0) {
-      avisar('Sin reportes', 'No hay reportes activos con los que comparar.');
-      return;
-    }
-
+    setEstadoImagenEscaner(null);
+    setCoincidencias([]);
+    setComparados(null);
     setEscaneando(true);
     try {
       // El token demuestra al servidor que hay una sesión iniciada
@@ -1370,7 +1369,10 @@ export default function App() {
         throw new Error(`${detalle || 'Error del servidor'} (código ${resp.status})`);
       }
       const data = await resp.json();
-      setCoincidencias(data.coincidencias ?? []);
+      const estado = data.estadoImagen;
+      const estadoValido = estado === 'mascota' || estado === 'sin_mascota' || estado === 'no_clara' ? estado : null;
+      setEstadoImagenEscaner(estadoValido);
+      setCoincidencias(estadoValido === 'sin_mascota' || estadoValido === 'no_clara' ? [] : (data.coincidencias ?? []));
       setComparados(typeof data.comparados === 'number' ? data.comparados : null);
       setResultadosVisible(true);
     } catch (e) {
@@ -2740,16 +2742,21 @@ export default function App() {
       </Modal>
 
       {/* Modal: Resultados del escáner */}
-      <Modal visible={resultadosVisible} animationType="slide" transparent>
+      <Modal visible={resultadosVisible} animationType="slide" transparent onRequestClose={() => setResultadosVisible(false)}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContenido}>
-            <Text style={styles.modalTitulo}>Posibles coincidencias</Text>
+            <Text style={styles.modalTitulo}>
+              {estadoImagenEscaner === 'sin_mascota' ? 'No detectamos una mascota' : estadoImagenEscaner === 'no_clara' ? 'Prueba con una foto más clara' : 'Posibles coincidencias'}
+            </Text>
             {coincidencias.length === 0 ? (
-              <Text style={{ color: '#666', marginBottom: 12 }}>
-                {comparados !== null
-                  ? `No encontramos coincidencias entre los ${comparados} reportes activos que se compararon.`
-                  : 'No encontramos coincidencias.'}{' '}
-                Puedes crear un reporte de mascota encontrada.
+              <Text style={{ color: '#666', marginBottom: 12, lineHeight: 21 }}>
+                {estadoImagenEscaner === 'sin_mascota'
+                  ? 'No detectamos una mascota en esta imagen. Intenta con una foto donde se vea claramente al animal.'
+                  : estadoImagenEscaner === 'no_clara'
+                    ? 'No pudimos distinguir con claridad a la mascota. Intenta con una foto bien iluminada, enfocada y con un solo animal como sujeto principal.'
+                    : comparados === 0
+                      ? 'No hay reportes activos con fotos disponibles para comparar en esta búsqueda. Puedes publicar un reporte de mascota perdida o encontrada, según tu caso.'
+                      : `${comparados !== null ? `No encontramos posibles coincidencias entre los ${comparados} reportes activos comparados.` : 'No encontramos posibles coincidencias.'} Puedes intentar con otra foto o publicar un reporte de mascota perdida o encontrada, según tu caso.`}
               </Text>
             ) : (
               coincidencias.map((c) => {
@@ -2761,7 +2768,7 @@ export default function App() {
                     style={styles.tarjeta}
                     onPress={() => {
                       setResultadosVisible(false);
-                      abrirDetalle(rep);
+                      setTimeout(() => abrirDetalle(rep), Platform.OS === 'ios' ? 450 : 0);
                     }}
                   >
                     <Image source={{ uri: rep.foto }} style={styles.tarjetaFoto} />
