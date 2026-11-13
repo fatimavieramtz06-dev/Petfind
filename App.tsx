@@ -655,6 +655,12 @@ export default function App() {
   const [cargandoReportes, setCargandoReportes] = useState<boolean>(true);
   const [editandoId, setEditandoId] = useState<string | null>(null);
   const [guiaVisible, setGuiaVisible] = useState<boolean>(false);
+  const [avisoBorradorVisible, setAvisoBorradorVisible] = useState(false);
+  useEffect(() => {
+    if (!avisoBorradorVisible) return;
+    const temporizador = setTimeout(() => setAvisoBorradorVisible(false), 5000);
+    return () => clearTimeout(temporizador);
+  }, [avisoBorradorVisible]);
   const [pasoGuia, setPasoGuia] = useState<number>(0);
   const [notificaciones, setNotificaciones] = useState<Notificacion[]>([]);
   const [notifVisible, setNotifVisible] = useState<boolean>(false);
@@ -1045,6 +1051,7 @@ export default function App() {
     setPassword('');
     setMostrarPassword(false);
     setAceptaPrivacidad(false);
+    limpiarFormulario(true);
   };
 
   // Pide permiso y devuelve la posición actual del dispositivo
@@ -1171,6 +1178,7 @@ export default function App() {
 
   // Deja el formulario vacío y lo cierra. Al publicar se conservan tipo y contacto para el siguiente reporte.
   const limpiarFormulario = (todo: boolean = false) => {
+    setAvisoBorradorVisible(false);
     setNombre('');
     setRaza('');
     setUbicacion('');
@@ -1193,6 +1201,7 @@ export default function App() {
   };
 
   const abrirFormulario = () => {
+    setAvisoBorradorVisible(false);
     setSelectorHtml(generarSelectorMapaHtml(
       coordsReporte ?? miUbicacion ?? { lat: 25.6866, lng: -100.3161 },
       coordsReporte
@@ -1200,20 +1209,39 @@ export default function App() {
     setModalVisible(true);
   };
 
-  // La X, Cancelar y el botón Atrás usan el mismo cierre.
+  // La X y Atrás conservan el borrador nuevo; al editar descartan los cambios locales.
   const cerrarFormulario = () => {
     if (subiendo) return;
     if (editandoId) {
       limpiarFormulario(true);
       return;
     }
-    setFotoLocal(null);
-    setCoordsReporte(null);
+    // Un reporte nuevo permanece como borrador en esta sesión, incluida foto y ubicación.
     setModalVisible(false);
+    setAvisoBorradorVisible(Boolean(
+      nombre.trim() || raza.trim() || descripcion.trim() || contactoNombre.trim() ||
+      telefono.trim() || fotoLocal || coordsReporte || ubicacion.trim() ||
+      especieOtro.trim() || recompensaTexto.trim() || hayRecompensa ||
+      especie !== 'Perro' || tipo !== 'Perdida' || opcionCuando !== 'ahora'
+    ));
+  };
+
+  // Cancelar es una acción explícita para descartar, distinta de cerrar el borrador.
+  const cancelarReporte = async () => {
+    if (subiendo) return;
+    const acepta = await confirmar(
+      editandoId ? '¿Descartar los cambios?' : '¿Descartar este reporte?',
+      editandoId
+        ? 'Se descartarán los cambios sin guardar. El reporte publicado conservará sus datos originales.'
+        : 'Se borrarán todos los datos y la foto de este borrador. No se publicará ningún reporte.'
+    );
+    if (!acepta) return;
+    limpiarFormulario(true);
   };
 
   // Abre el formulario con los datos de un reporte propio para corregirlos
   const abrirEdicion = (r: ReporteMascota) => {
+    setAvisoBorradorVisible(false);
     setEditandoId(r.id);
     setNombre(r.nombre);
     setRaza(r.raza === 'Sin especificar' ? '' : r.raza);
@@ -2045,6 +2073,12 @@ export default function App() {
       </View>
       )}
 
+      {avisoBorradorVisible && (
+        <View pointerEvents="none" style={[styles.avisoBorrador, { bottom: esEscritorio ? 24 : 88 }]}>
+          <Text accessibilityLiveRegion="polite" style={styles.avisoBorradorTexto}>Borrador conservado durante esta sesión.</Text>
+        </View>
+      )}
+
       {modalPrivacidad}
 
       {/* Guía de primer uso */}
@@ -2317,10 +2351,25 @@ export default function App() {
             <Text style={styles.formularioEtiqueta}>Foto de la mascota *</Text>
 
             {fotoLocal && (
-              <Image
-                source={{ uri: fotoLocal }}
-                style={{ width: 100, height: 100, borderRadius: 10, alignSelf: 'center', marginBottom: 10 }}
-              />
+              <View style={styles.fotoElegidaContenedor}>
+                <Image
+                  source={{ uri: fotoLocal }}
+                  style={styles.fotoElegidaImagen}
+                  accessibilityLabel="Foto elegida para el reporte"
+                />
+                <TouchableOpacity
+                  style={[styles.fotoElegidaQuitar, subiendo && { opacity: 0.5 }]}
+                  onPress={() => setFotoLocal(null)}
+                  disabled={subiendo}
+                  accessibilityRole="button"
+                  accessibilityLabel="Quitar foto elegida"
+                  accessibilityHint="Quita la foto del formulario. Puedes elegir otra antes de guardar."
+                >
+                  <View style={styles.fotoElegidaQuitarCirculo}>
+                    <Ico n="close" s={16} c="#fff" />
+                  </View>
+                </TouchableOpacity>
+              </View>
             )}
             <View style={styles.selectorRow}>
               <TouchableOpacity style={styles.opcionBoton} onPress={() => elegirFoto('camara')}>
@@ -2534,12 +2583,12 @@ export default function App() {
             <View style={styles.modalAcciones}>
               <TouchableOpacity
                 style={styles.botonCancelar}
-                onPress={cerrarFormulario}
+                onPress={cancelarReporte}
                 disabled={subiendo}
                 accessibilityRole="button"
-                accessibilityLabel="Cancelar reporte"
+                accessibilityLabel={editandoId ? 'Cancelar edición' : 'Cancelar reporte'}
               >
-                <Text>Cancelar</Text>
+                <Text>{editandoId ? 'Cancelar edición' : 'Cancelar reporte'}</Text>
               </TouchableOpacity>
               <TouchableOpacity style={styles.botonGuardar} onPress={guardarReporte} disabled={subiendo}>
                 <Text style={styles.textoBlanco}>{subiendo ? 'Guardando...' : editandoId ? 'Guardar cambios' : 'Publicar'}</Text>
@@ -3086,6 +3135,12 @@ const styles = StyleSheet.create({
   modalTitulo: { fontSize: 18, fontWeight: 'bold', marginBottom: 15 },
   formularioCabecera: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingBottom: 12 },
   formularioCerrar: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: '#f1f4f2' },
+  avisoBorrador: { position: 'absolute', alignSelf: 'center', maxWidth: '90%', paddingHorizontal: 18, paddingVertical: 12, borderRadius: 12, backgroundColor: '#263c32', zIndex: 1000, elevation: 8 },
+  avisoBorradorTexto: { color: '#fff', fontSize: 14, lineHeight: 20, textAlign: 'center' },
+  fotoElegidaContenedor: { width: 168, height: 168, alignSelf: 'center', marginBottom: 12, position: 'relative' },
+  fotoElegidaImagen: { position: 'absolute', left: 0, bottom: 0, width: 144, height: 144, borderRadius: 12 },
+  fotoElegidaQuitar: { position: 'absolute', top: 0, right: 0, width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  fotoElegidaQuitarCirculo: { width: 28, height: 28, borderRadius: 14, backgroundColor: '#263c32', borderWidth: 2, borderColor: '#fff', alignItems: 'center', justifyContent: 'center' },
   formularioEtiqueta: { fontSize: 14, lineHeight: 20, fontWeight: '600', color: '#333', marginBottom: 6, marginTop: 4 },
   formularioAyuda: { fontSize: 13, lineHeight: 19, color: '#555', marginBottom: 12 },
   formularioOpcionFecha: { flexGrow: 0, flexShrink: 0, minWidth: 88, minHeight: 44, paddingHorizontal: 12, paddingVertical: 11, borderWidth: 1, borderColor: '#ccc', borderRadius: 6, alignItems: 'center', justifyContent: 'center' },
