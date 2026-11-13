@@ -1289,6 +1289,14 @@ export default function App() {
       avisar('Falta la especie', 'Indica qué tipo de animal es.');
       return;
     }
+    if (especie === 'Otro' && especieOtro.trim().length > 60) {
+      avisar('Especie demasiado larga', 'Escribe la especie con un máximo de 60 caracteres.');
+      return;
+    }
+    if (tipo === 'Perdida' && hayRecompensa && recompensaTexto.trim().length > 100) {
+      avisar('Recompensa demasiado larga', 'Describe la recompensa con un máximo de 100 caracteres.');
+      return;
+    }
     if (!fotoLocal) {
       avisar('Falta la foto', 'Agrega una foto de la mascota para poder identificarla.');
       return;
@@ -2549,6 +2557,7 @@ export default function App() {
                     accessibilityLabel="Monto o detalle de recompensa, opcional"
                     style={styles.input}
                     placeholder="Monto o detalle (Ej. $500) — opcional"
+                    maxLength={100}
                     value={recompensaTexto}
                     onChangeText={setRecompensaTexto}
                   />
@@ -2605,6 +2614,7 @@ export default function App() {
                 <TextInput
                   style={styles.input}
                   placeholder="Ej. Conejo, Hámster, Loro..."
+                  maxLength={60}
                   value={especieTemporal}
                   onChangeText={setEspecieTemporal}
                   autoFocus
