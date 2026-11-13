@@ -55,3 +55,6 @@ yarn-error.*
 
 # Respaldos
 respaldos/
+
+# Reporte local de dependencias
+/auditoria.json
