@@ -872,11 +872,21 @@ export default function App() {
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ notificacionId: nt.id }),
       });
-      if (!resp.ok) throw new Error('fallo');
+      const data: { error?: string; cerrados?: number; yaResueltos?: boolean } = await resp.json();
+      if (!resp.ok) {
+        throw new Error(typeof data.error === 'string' ? data.error : 'No se pudo confirmar el reencuentro. Intenta de nuevo.');
+      }
       setNotifVisible(false);
-      avisar('¡Qué bueno!', 'Los reportes se marcaron como resueltos. Gracias por usar PetFind.');
-    } catch {
-      avisar('Error', 'No se pudo completar. Revisa tu conexión e intenta de nuevo.');
+      avisar(
+        data.yaResueltos ? 'Reencuentro ya confirmado' : '¡Qué bueno!',
+        data.yaResueltos
+          ? 'Ambos reportes ya estaban resueltos. No se hicieron cambios adicionales.'
+          : 'Los reportes se marcaron como resueltos. Gracias por usar PetFind.'
+      );
+    } catch (e) {
+      avisar('No se pudo confirmar', e instanceof TypeError
+        ? 'No se pudo conectar con el servidor. Revisa tu conexión e intenta de nuevo.'
+        : e instanceof Error ? e.message : 'No se pudo confirmar el reencuentro. Intenta de nuevo.');
     }
   };
 
