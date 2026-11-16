@@ -592,6 +592,7 @@ const ESCANEO_URL = 'https://petfind-backend.vercel.app/api/escanear';
 // Servidor que avisa a otros usuarios cuando se publica una mascota parecida a la suya
 const NOTIFICAR_URL = 'https://petfind-backend.vercel.app/api/notificar';
 // Servidor que cierra los dos reportes cuando se confirma que la mascota ya regresó a casa
+const AVISTAMIENTOS_URL = 'https://petfind-backend.vercel.app/api/avistamientos';
 const MODERACION_URL = 'https://petfind-backend.vercel.app/api/moderar';
 const MOTIVOS_DENUNCIA = ['Información falsa', 'Spam o publicidad', 'Contenido inapropiado', 'Otro'] as const;
 const REENCUENTRO_URL = 'https://petfind-backend.vercel.app/api/reencuentro';
@@ -629,6 +630,7 @@ const AVISO_PRIVACIDAD: { t: string; x: string }[] = [
     t: 'Tus derechos',
     x: 'Puedes editar o borrar tus reportes desde la app. Para acceder a tus datos, corregirlos, cancelarlos u oponerte a su uso, o para eliminar tu cuenta, contacta al equipo' + (CORREO_PRIVACIDAD ? ` en ${CORREO_PRIVACIDAD}.` : '.'),
   },
+  { t: 'Avistamientos', x: 'Si envías un avistamiento, guardamos el lugar, fecha, comentario, foto opcional y el identificador de tu cuenta. El autor del reporte puede consultar el contenido; tu correo no se muestra. La ubicación exacta no es pública. No hay borrado automático de avistamientos; para solicitar su eliminación escribe al correo de contacto. Solo comparte información necesaria sobre la mascota.' },
   { t: 'Cambios', x: 'Si este aviso cambia, lo publicaremos en la app.' },
 ];
 
@@ -658,7 +660,7 @@ const PASOS_GUIA: { icono: string; mci?: boolean; titulo: string; texto: string 
   {
     icono: 'notifications-outline',
     titulo: 'Recibe avisos',
-    texto: 'Si alguien publica una mascota parecida a la tuya, te lo mostramos en la campana de la parte superior.',
+    texto: 'La campana muestra posibles coincidencias y avistamientos recibidos. También puedes abrir tu reporte perdido y consultar Avistamientos recibidos. Son pistas por verificar.',
   },
 ];
 
@@ -699,6 +701,8 @@ interface Notificacion {
   creadoMs: number;
 }
 
+type Avistamiento = { id: string; comentario: string; referencia: string; latitud: number; longitud: number; fechaEvento: string; foto: string; creado: string };
+
 type ResumenDenuncia = { id: string; nombre: string; motivo: string; creado: string; accion: string };
 type RevisionDenuncia = {
   denuncia: { id: string; motivo: string; detalle: string; estado: string; creado: string; accion: string; nota: string; revisado: string; copia: Partial<ReporteMascota> };
@@ -706,11 +710,11 @@ type RevisionDenuncia = {
   retirada?: Partial<ReporteMascota> | null;
   version: string;
 };
-async function pedirModeracion(ruta = '', datos?: object) {
+async function pedirModeracion(ruta = '', datos?: object, servicio = MODERACION_URL) {
   const usuario = auth.currentUser;
   if (!usuario) throw new Error('Inicia sesión de nuevo.');
   const token = await usuario.getIdToken();
-  const resp = await fetch(MODERACION_URL + ruta, { method: datos ? 'POST' : 'GET', headers: { Authorization: `Bearer ${token}`, ...(datos ? { 'Content-Type': 'application/json' } : {}) }, ...(datos ? { body: JSON.stringify(datos) } : {}) });
+  const resp = await fetch(servicio + ruta, { method: datos ? 'POST' : 'GET', headers: { Authorization: `Bearer ${token}`, ...(datos ? { 'Content-Type': 'application/json' } : {}) }, ...(datos ? { body: JSON.stringify(datos) } : {}) });
   const resultado = await resp.json();
   if (auth.currentUser?.uid !== usuario.uid) throw new Error('La sesión cambió. Vuelve a abrir esta sección.');
   if (!resp.ok) throw new Error(typeof resultado.error === 'string' ? resultado.error : 'No se pudo completar la operación.');
@@ -934,6 +938,28 @@ export default function App() {
   const [descripcion, setDescripcion] = useState<string>('');
 
   // Estados de la pantalla de detalle
+  const [avistamientoVisible, setAvistamientoVisible] = useState(false);
+  const [modoAvistamiento, setModoAvistamiento] = useState<'enviar' | 'recibidos'>('enviar');
+  const [comentarioAvistamiento, setComentarioAvistamiento] = useState('');
+  const [referenciaAvistamiento, setReferenciaAvistamiento] = useState('');
+  const [cuandoAvistamiento, setCuandoAvistamiento] = useState('ahora');
+  const [fotoAvistamiento, setFotoAvistamiento] = useState('');
+  const [coordsAvistamiento, setCoordsAvistamiento] = useState<{ lat: number; lng: number } | null>(null);
+  const [errorAvistamiento, setErrorAvistamiento] = useState('');
+  const [ocupadoAvistamiento, setOcupadoAvistamiento] = useState(false);
+  const [listaAvistamientos, setListaAvistamientos] = useState<Avistamiento[]>([]);
+  const [siguienteAvistamiento, setSiguienteAvistamiento] = useState<string | null>(null);
+  const [mapaAvistamientoVisible, setMapaAvistamientoVisible] = useState(false);
+  const [mapaAvistamientoHtml, setMapaAvistamientoHtml] = useState('');
+  const [puntoAvistamiento, setPuntoAvistamiento] = useState<{ lat: number; lng: number } | null>(null);
+  const [moviendoAvistamiento, setMoviendoAvistamiento] = useState(true);
+  const [localizandoAvistamiento, setLocalizandoAvistamiento] = useState(false);
+  const mapaAvistamientoSesion = useRef(0);
+  const mapaAvistamientoAbierto = useRef(false);
+  const avistamientoBloqueado = useRef(false);
+  const consultaAvistamientos = useRef(0);
+  const solicitudAvistamiento = useRef<{ id: string; fecha: string } | null>(null);
+  const avistamientoScroll = useRef<ScrollView>(null);
   const [denunciaVisible, setDenunciaVisible] = useState(false);
   const [motivoDenuncia, setMotivoDenuncia] = useState<string>(MOTIVOS_DENUNCIA[0]);
   const [detalleDenuncia, setDetalleDenuncia] = useState('');
@@ -1139,7 +1165,9 @@ export default function App() {
           snap.docChanges().forEach((c) => {
             const x = c.doc.data() as any;
             if (c.type === 'added' && !x.leida) {
-              if (x.tipo === 'moderacion') {
+              if (x.tipo === 'avistamiento') {
+                avisar('Nuevo avistamiento', `Alguien informó un avistamiento para ${x.tuReporteNombre || 'tu mascota'}. Consúltalo en la campana de avisos.`);
+              } else if (x.tipo === 'moderacion') {
                 avisar('Aviso de moderación', x.motivo || 'Se revisó una publicación.');
               } else if (x.tipo === 'cierre') {
                 avisar('Tu reporte se cerró', x.motivo || 'Tu reporte se marcó como resuelto.');
@@ -1214,13 +1242,13 @@ export default function App() {
     } catch {}
     // Los avisos de cierre solo informan: no hay reporte que abrir
     if (nt.tipo === 'cierre' || nt.tipo === 'moderacion') return;
-    const rep = reportes.find((r) => r.id === nt.reporteNuevoId);
+    const rep = reportes.find((r) => r.id === (nt.tipo === 'avistamiento' ? nt.tuReporteId : nt.reporteNuevoId));
     if (!rep) {
       avisar('Reporte no disponible', 'Ese reporte ya no está activo.');
       return;
     }
     setNotifVisible(false);
-    setTimeout(() => abrirDetalle(rep), Platform.OS === 'ios' ? 450 : 0);
+    setTimeout(() => { abrirDetalle(rep); if (nt.tipo === 'avistamiento') setTimeout(() => abrirAvistamientos(rep), Platform.OS === 'ios' ? 500 : 0); }, Platform.OS === 'ios' ? 450 : 0);
   };
 
   const marcarTodasLeidas = async () => {
@@ -1361,6 +1389,11 @@ export default function App() {
     } catch {}
     // Limpiar los datos de la sesión desde la acción de salir.
     consultaModeracionRef.current++;
+    consultaAvistamientos.current++;
+    mapaAvistamientoAbierto.current = false;
+    mapaAvistamientoSesion.current++;
+    setAvistamientoVisible(false); setMapaAvistamientoVisible(false); setListaAvistamientos([]);
+    setFotoAvistamiento(''); setCoordsAvistamiento(null); setComentarioAvistamiento('');
     setEsAdmin(false);
     setModeracionVisible(false);
     setDenunciaVisible(false);
@@ -1947,6 +1980,100 @@ export default function App() {
     } catch {
       avisar('Error', 'No se pudo eliminar el reporte. Revisa tu conexión.');
     }
+  };
+
+  const cambiarAvistamiento = () => { solicitudAvistamiento.current = null; setErrorAvistamiento(''); };
+  const cargarAvistamientos = async (r: ReporteMascota, cursor = '') => {
+    const turno = ++consultaAvistamientos.current;
+    setOcupadoAvistamiento(true); setErrorAvistamiento('');
+    if (!cursor) { setListaAvistamientos([]); setSiguienteAvistamiento(null); }
+    try {
+      const data = await pedirModeracion(`?reporteId=${encodeURIComponent(r.id)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, undefined, AVISTAMIENTOS_URL);
+      if (consultaAvistamientos.current !== turno) return;
+      setListaAvistamientos(anterior => cursor ? [...anterior, ...data.items] : data.items);
+      setSiguienteAvistamiento(data.siguiente);
+    } catch (e) { if (consultaAvistamientos.current === turno) setErrorAvistamiento(e instanceof Error ? e.message : 'No se pudieron cargar los avistamientos.'); }
+    finally { if (consultaAvistamientos.current === turno) setOcupadoAvistamiento(false); }
+  };
+  const abrirAvistamientos = (r: ReporteMascota) => {
+    const propio = r.autorId === auth.currentUser?.uid;
+    setModoAvistamiento(propio ? 'recibidos' : 'enviar'); setErrorAvistamiento('');
+    setComentarioAvistamiento(''); setReferenciaAvistamiento(''); setFotoAvistamiento('');
+    setCoordsAvistamiento(null); setCuandoAvistamiento('ahora'); solicitudAvistamiento.current = null;
+    setListaAvistamientos([]); setSiguienteAvistamiento(null); setAvistamientoVisible(true);
+    if (propio) void cargarAvistamientos(r);
+  };
+  const cerrarAvistamiento = async () => {
+    if (avistamientoBloqueado.current) return;
+    if (modoAvistamiento === 'enviar' && (comentarioAvistamiento || referenciaAvistamiento || fotoAvistamiento || coordsAvistamiento)) {
+      if (!await confirmar('¿Descartar avistamiento?', 'Los datos que escribiste no se enviarán.')) return;
+    }
+    consultaAvistamientos.current++; setAvistamientoVisible(false); setOcupadoAvistamiento(false);
+  };
+  const elegirFotoAvistamiento = async (origen: 'camara' | 'galeria') => {
+    if (avistamientoBloqueado.current) return;
+    avistamientoBloqueado.current = true; setOcupadoAvistamiento(true); setErrorAvistamiento('');
+    const uid = auth.currentUser?.uid;
+    try {
+      const permiso = origen === 'camara' ? await ImagePicker.requestCameraPermissionsAsync() : await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permiso.granted) throw new Error('Permite el acceso a la cámara o las fotos para adjuntar una imagen. También puedes enviar sin foto.');
+      const opciones: ImagePicker.ImagePickerOptions = { mediaTypes: ['images'], quality: 0.3, base64: true, allowsEditing: true, aspect: [1, 1] };
+      const result = origen === 'camara' ? await ImagePicker.launchCameraAsync(opciones) : await ImagePicker.launchImageLibraryAsync(opciones);
+      if (auth.currentUser?.uid !== uid || result.canceled) return;
+      const imagen = result.assets?.[0]?.base64;
+      if (!imagen || imagen.length > MAX_FOTO_BASE64) throw new Error('La foto es demasiado grande. Recórtala más o envía sin foto.');
+      cambiarAvistamiento(); setFotoAvistamiento(`data:image/${imagen.startsWith('iVBORw0KGgo') ? 'png' : 'jpeg'};base64,${imagen}`);
+    } catch (e) { if (auth.currentUser?.uid === uid) setErrorAvistamiento(e instanceof Error ? e.message : 'No se pudo adjuntar la foto.'); }
+    finally { avistamientoBloqueado.current = false; setOcupadoAvistamiento(false); }
+  };
+  const abrirMapaAvistamiento = () => {
+    Keyboard.dismiss(); mapaAvistamientoAbierto.current = true;
+    const centro = coordsAvistamiento || (mascotaDetalle ? { lat: mascotaDetalle.latitud, lng: mascotaDetalle.longitud } : miUbicacion) || { lat: 25.6866, lng: -100.3161 };
+    const sesion = ++mapaAvistamientoSesion.current;
+    setPuntoAvistamiento(centro); setMoviendoAvistamiento(true);
+    setMapaAvistamientoHtml(generarSelectorMapaHtml(centro, coordsAvistamiento, true, sesion));
+    setMapaAvistamientoVisible(true);
+  };
+  const cerrarMapaAvistamiento = () => {
+    mapaAvistamientoAbierto.current = false; mapaAvistamientoSesion.current++;
+    setMapaAvistamientoVisible(false); setLocalizandoAvistamiento(false);
+  };
+  const moverMapaAvistamiento = (data: string) => {
+    if (!mapaAvistamientoAbierto.current) return;
+    try {
+      const m = JSON.parse(data);
+      if (m.sesion !== mapaAvistamientoSesion.current || !Number.isFinite(m.lat) || !Number.isFinite(m.lng) || Math.abs(m.lat) > 90 || Math.abs(m.lng) > 180) return;
+      if (m.tipo === 'moviendo') setMoviendoAvistamiento(true);
+      if (m.tipo === 'puntoTemporal') { setPuntoAvistamiento({ lat: m.lat, lng: m.lng }); setMoviendoAvistamiento(false); }
+    } catch {}
+  };
+  const localizarAvistamiento = async () => {
+    if (localizandoAvistamiento) return;
+    const sesion = mapaAvistamientoSesion.current;
+    setLocalizandoAvistamiento(true);
+    try {
+      const punto = await obtenerUbicacion();
+      if (!punto || !mapaAvistamientoAbierto.current || sesion !== mapaAvistamientoSesion.current) return;
+      const nuevaSesion = ++mapaAvistamientoSesion.current;
+      setPuntoAvistamiento(punto); setMoviendoAvistamiento(true);
+      setMapaAvistamientoHtml(generarSelectorMapaHtml(punto, punto, true, nuevaSesion));
+    } finally { if (mapaAvistamientoAbierto.current) setLocalizandoAvistamiento(false); }
+  };
+  const enviarAvistamiento = async () => {
+    if (avistamientoBloqueado.current || !mascotaDetalle) return;
+    if (!coordsAvistamiento || comentarioAvistamiento.trim().length < 10) {
+      setErrorAvistamiento(!coordsAvistamiento ? 'Confirma el lugar donde viste la mascota en el mapa.' : 'Describe lo que viste con al menos 10 caracteres.');
+      avistamientoScroll.current?.scrollTo({ y: 0, animated: true }); return;
+    }
+    avistamientoBloqueado.current = true; setOcupadoAvistamiento(true); setErrorAvistamiento('');
+    if (!solicitudAvistamiento.current) solicitudAvistamiento.current = { id: `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}_${Math.random().toString(36).slice(2)}`, fecha: fechaEventoAlGuardar(OPCIONES_CUANDO.find(o => o.id === cuandoAvistamiento)?.min || 0) };
+    const solicitud = solicitudAvistamiento.current;
+    try {
+      await pedirModeracion('', { solicitudId: solicitud.id, reporteId: mascotaDetalle.id, comentario: comentarioAvistamiento.trim(), referencia: referenciaAvistamiento.trim(), latitud: coordsAvistamiento.lat, longitud: coordsAvistamiento.lng, fechaEvento: solicitud.fecha, foto: fotoAvistamiento }, AVISTAMIENTOS_URL);
+      setAvistamientoVisible(false); setFotoAvistamiento(''); setComentarioAvistamiento(''); setCoordsAvistamiento(null);
+      avisar('Avistamiento enviado', 'El autor recibió un aviso en PetFind. Tu información es una pista por verificar; no confirma la identidad de la mascota.');
+    } catch (e) { setErrorAvistamiento(e instanceof Error ? e.message : 'No se pudo enviar. Puedes volver a intentarlo sin duplicar el envío.'); avistamientoScroll.current?.scrollTo({ y: 0, animated: true }); }
+    finally { avistamientoBloqueado.current = false; setOcupadoAvistamiento(false); }
   };
 
   const abrirDetalle = (mascota: ReporteMascota) => {
@@ -2843,12 +2970,12 @@ export default function App() {
                   Aún no tienes avisos
                 </Text>
                 <Text style={{ fontSize: 13, color: '#555', textAlign: 'center', maxWidth: 280, lineHeight: 19 }}>
-                  Te avisaremos aquí si alguien publica una mascota parecida a la tuya.
+                  Aquí recibirás avisos de posibles coincidencias y de avistamientos para tus mascotas perdidas.
                 </Text>
               </View>
             ) : (
               <ScrollView>
-                {notificaciones.some((nt) => nt.tipo !== 'cierre' && nt.tipo !== 'moderacion') && <Text style={styles.avisoIa}>{AVISO_IA}</Text>}
+                {notificaciones.some((nt) => nt.tipo !== 'cierre' && nt.tipo !== 'moderacion' && nt.tipo !== 'avistamiento') && <Text style={styles.avisoIa}>{AVISO_IA}</Text>}
                 {notificaciones.map((nt) => (
                   <View
                     key={nt.id}
@@ -2864,20 +2991,20 @@ export default function App() {
                     }}
                   >
                     <Ico
-                      mci={nt.tipo !== 'cierre' && nt.tipo !== 'moderacion'}
-                      n={nt.tipo === 'moderacion' ? 'shield-checkmark-outline' : nt.tipo === 'cierre' ? 'checkmark-circle' : 'paw'}
+                      mci={nt.tipo !== 'cierre' && nt.tipo !== 'moderacion' && nt.tipo !== 'avistamiento'}
+                      n={nt.tipo === 'avistamiento' ? 'eye-outline' : nt.tipo === 'moderacion' ? 'shield-checkmark-outline' : nt.tipo === 'cierre' ? 'checkmark-circle' : 'paw'}
                       s={22}
                       c={PRIMARY_DARK}
                     />
                     <View style={{ flex: 1 }}>
                       <TouchableOpacity onPress={() => abrirNotificacion(nt)} accessibilityRole="button" accessibilityHint="Abre el reporte relacionado o marca el aviso de cierre como leído">
                       <Text style={{ fontWeight: 'bold', fontSize: 14, color: '#222' }}>
-                        {nt.tipo === 'moderacion' ? 'Aviso de moderación' : nt.tipo === 'cierre'
+                        {nt.tipo === 'avistamiento' ? `Avistamiento de ${nt.tuReporteNombre || 'tu mascota'}` : nt.tipo === 'moderacion' ? 'Aviso de moderación' : nt.tipo === 'cierre'
                           ? tituloAvisoCierre(nt.tuReporteNombre)
                           : `Posible coincidencia con ${nt.tuReporteNombre || 'tu reporte'}`}
                       </Text>
                       <Text style={{ fontSize: 13, color: '#555', marginTop: 2, lineHeight: 18 }}>
-                        {nt.tipo === 'cierre' || nt.tipo === 'moderacion'
+                        {nt.tipo === 'cierre' || nt.tipo === 'moderacion' || nt.tipo === 'avistamiento'
                           ? nt.motivo
                           : `${
                               nt.reporteNuevoTipo === 'Encontrada'
@@ -2888,7 +3015,8 @@ export default function App() {
                             }`}
                       </Text>
                       </TouchableOpacity>
-                      {nt.tipo !== 'cierre' && nt.tipo !== 'moderacion' && (
+                      {nt.tipo === 'avistamiento' && <TouchableOpacity accessibilityRole="button" style={styles.accionAvisoAccesible} onPress={() => abrirNotificacion(nt)}><Text style={{ color: PRIMARY_DARK, fontWeight: '700' }}>Ver avistamientos</Text></TouchableOpacity>}
+                      {nt.tipo !== 'cierre' && nt.tipo !== 'moderacion' && nt.tipo !== 'avistamiento' && (
                         <View style={{ flexDirection: 'row', flexWrap: 'wrap', columnGap: 16, rowGap: 6, marginTop: 8 }}>
                           <TouchableOpacity accessibilityRole="button" style={styles.accionAvisoAccesible} onPress={() => abrirNotificacion(nt)}>
                             <Text style={{ fontSize: 14, color: PRIMARY_DARK, fontWeight: '700' }}>Ver reporte</Text>
@@ -3443,6 +3571,7 @@ export default function App() {
                     style={[styles.compartirBoton, { marginTop: 14, marginBottom: 8 }]}>
                     <IcoTexto n="share-social-outline" s={20} c={PRIMARY_DARK} centrado textoStyle={{ color: PRIMARY_DARK, fontSize: 14, fontWeight: '700' }}>Compartir reporte</IcoTexto>
                   </TouchableOpacity>
+                  {mascotaDetalle.tipo === 'Perdida' && (mascotaDetalle.autorId === auth.currentUser?.uid || (mascotaDetalle.estado !== 'Reunida' && mascotaDetalle.estado !== 'Vencida')) && <TouchableOpacity accessibilityRole="button" style={[styles.compartirBoton, { marginBottom: 8 }]} onPress={() => abrirAvistamientos(mascotaDetalle)}><IcoTexto n="eye-outline" s={20} c={PRIMARY_DARK} centrado textoStyle={{ color: PRIMARY_DARK, fontWeight: '700' }}>{mascotaDetalle.autorId === auth.currentUser?.uid ? 'Avistamientos recibidos' : 'Reportar avistamiento'}</IcoTexto></TouchableOpacity>}
                   {mascotaDetalle.autorId !== auth.currentUser?.uid && <TouchableOpacity accessibilityRole="button" style={{ minHeight: 44, justifyContent: 'center', alignItems: 'center', marginBottom: 8 }} onPress={() => {
                     setMotivoDenuncia(MOTIVOS_DENUNCIA[0]); setDetalleDenuncia(''); setErrorDenuncia(''); setDenunciaVisible(true);
                   }}><IcoTexto n="flag-outline" s={18} c="#9f331e" centrado textoStyle={{ color: '#9f331e', fontWeight: '600', fontSize: 14 }}>Denunciar publicación</IcoTexto></TouchableOpacity>}
@@ -3585,6 +3714,67 @@ export default function App() {
                 {compartiendo && <Text accessibilityLiveRegion="polite" style={styles.formularioAyuda}>Preparando…</Text>}
               </View>
             </View>
+          </Modal>
+          <Modal visible={avistamientoVisible} transparent animationType="slide" onRequestClose={() => { void cerrarAvistamiento(); }}>
+            <View style={styles.modalOverlay}><View style={[styles.modalContenido, { maxHeight: '92%', maxWidth: 600 }]}>
+              <View style={styles.formularioCabecera}>
+                <Text accessibilityRole="header" style={[styles.modalTitulo, { flex: 1, marginBottom: 0 }]}>{modoAvistamiento === 'recibidos' ? 'Avistamientos recibidos' : 'Reportar avistamiento'}</Text>
+                <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar avistamientos" disabled={ocupadoAvistamiento && modoAvistamiento === 'enviar'} style={styles.formularioCerrar} onPress={() => { void cerrarAvistamiento(); }}><Ico n="close" s={24} c="#222" /></TouchableOpacity>
+              </View>
+              <ScrollView ref={avistamientoScroll} style={{ flexShrink: 1 }} keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 12 }}>
+                <Text style={styles.formularioAyuda}>Reporte: {mascotaDetalle?.nombre}. Los avistamientos son pistas por verificar: compara la foto y las señas antes de dar por localizada a la mascota.</Text>
+                {!!errorAvistamiento && <ErrorCampoReporte mensaje={errorAvistamiento} />}
+                {modoAvistamiento === 'recibidos' ? <>
+                  <TouchableOpacity accessibilityRole="button" disabled={ocupadoAvistamiento} style={styles.compartirBoton} onPress={() => { if (mascotaDetalle) void cargarAvistamientos(mascotaDetalle); }}><Text style={styles.compartirTexto}>Actualizar avistamientos</Text></TouchableOpacity>
+                  <Text style={styles.formularioAyuda}>Solo tú, como autor del reporte, puedes consultar estas ubicaciones. Revisa la fecha de cada pista; pueden corresponder a momentos diferentes.</Text>
+                  {!ocupadoAvistamiento && !errorAvistamiento && listaAvistamientos.length === 0 && <Text style={styles.formularioAyuda}>Todavía no has recibido avistamientos para este reporte.</Text>}
+                  {listaAvistamientos.map(a => <View key={a.id} style={{ padding: 14, borderWidth: 1, borderColor: '#cbded6', borderRadius: 12, marginBottom: 12 }}>
+                    <Text accessibilityRole="header" style={styles.formularioEtiqueta}>Avistamiento por verificar</Text>
+                    <Text style={styles.formularioAyuda}>Visto: {fechaCompleta(a.fechaEvento)} · {tiempoRelativo(a.fechaEvento)}</Text>
+                    {!!a.foto && <Image source={{ uri: a.foto }} accessibilityLabel="Foto adjunta al avistamiento" resizeMode="contain" style={{ width: '100%', height: 200, marginBottom: 10 }} />}
+                    <Text selectable style={{ fontSize: 15, lineHeight: 22, marginBottom: 10 }}>{a.comentario}</Text>
+                    {!!a.referencia && <Text style={styles.formularioAyuda}>Referencia: {a.referencia}</Text>}
+                    <View style={{ height: 180 }}><VistaHtml html={generarSelectorMapaHtml({ lat: a.latitud, lng: a.longitud }, { lat: a.latitud, lng: a.longitud })} scrollEnabled={false} /></View>
+                    <Text selectable style={styles.formularioAyuda}>Punto informado: {a.latitud.toFixed(5)}, {a.longitud.toFixed(5)}</Text>
+                    <TouchableOpacity accessibilityRole="link" style={styles.compartirBoton} onPress={() => { void Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${a.latitud},${a.longitud}`).catch(() => avisar('No se pudo abrir el mapa', 'Puedes copiar las coordenadas que aparecen arriba.')); }}><Text style={styles.compartirTexto}>Abrir punto en Google Maps</Text></TouchableOpacity>
+                  </View>)}
+                  {!!siguienteAvistamiento && <TouchableOpacity disabled={ocupadoAvistamiento} accessibilityRole="button" style={styles.compartirBoton} onPress={() => { if (mascotaDetalle) void cargarAvistamientos(mascotaDetalle, siguienteAvistamiento); }}><Text style={styles.compartirTexto}>Cargar más avistamientos</Text></TouchableOpacity>}
+                </> : <>
+                  <Text style={styles.formularioAyuda}>Solo el autor del reporte podrá ver el lugar, el comentario y la foto. No te acerques a un animal si no es seguro. Los campos con * son obligatorios.</Text>
+                  <Text style={styles.formularioEtiqueta}>¿Cuándo la viste? *</Text>
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+                    {OPCIONES_CUANDO.map(o => <TouchableOpacity key={o.id} accessibilityRole="radio" accessibilityState={{ checked: cuandoAvistamiento === o.id }} disabled={ocupadoAvistamiento} style={[styles.formularioOpcionFecha, cuandoAvistamiento === o.id && styles.opcionActiva]} onPress={() => { cambiarAvistamiento(); setCuandoAvistamiento(o.id); }}><Text style={cuandoAvistamiento === o.id ? styles.textoBlanco : styles.textoNegro}>{o.label}</Text></TouchableOpacity>)}
+                  </View>
+                  <Text style={styles.formularioEtiqueta}>Lugar del avistamiento *</Text>
+                  <TouchableOpacity accessibilityRole="button" disabled={ocupadoAvistamiento} style={styles.compartirBoton} onPress={abrirMapaAvistamiento}><Text style={styles.compartirTexto}>{coordsAvistamiento ? 'Ajustar punto confirmado en el mapa' : 'Elegir dónde viste la mascota'}</Text></TouchableOpacity>
+                  {coordsAvistamiento && <><View style={{ height: 150 }}><VistaHtml html={generarSelectorMapaHtml(coordsAvistamiento, coordsAvistamiento)} scrollEnabled={false} /></View><Text style={styles.formularioAyuda}>Punto confirmado: {coordsAvistamiento.lat.toFixed(5)}, {coordsAvistamiento.lng.toFixed(5)}</Text></>}
+                  <Text style={styles.formularioEtiqueta}>Referencia del lugar (opcional)</Text>
+                  <TextInput accessibilityLabel="Referencia del lugar del avistamiento" style={styles.input} editable={!ocupadoAvistamiento} maxLength={150} value={referenciaAvistamiento} onChangeText={v => { cambiarAvistamiento(); setReferenciaAvistamiento(v); }} placeholder="Ej. Frente al parque, junto a la entrada" />
+                  <Text style={styles.formularioEtiqueta}>¿Qué viste? *</Text>
+                  <TextInput accessibilityLabel="Descripción del avistamiento, mínimo diez caracteres" style={[styles.input, { minHeight: 90, textAlignVertical: 'top' }]} editable={!ocupadoAvistamiento} multiline maxLength={500} value={comentarioAvistamiento} onChangeText={v => { cambiarAvistamiento(); setComentarioAvistamiento(v); }} placeholder="Describe las señas, hacia dónde iba y qué te hizo pensar que era esta mascota." />
+                  <Text style={styles.formularioEtiqueta}>Foto del avistamiento (opcional)</Text>
+                  {!!fotoAvistamiento && <><Image source={{ uri: fotoAvistamiento }} accessibilityLabel="Foto del avistamiento elegida" resizeMode="contain" style={{ height: 160, width: '100%' }} /><TouchableOpacity accessibilityRole="button" disabled={ocupadoAvistamiento} style={styles.compartirBoton} onPress={() => { cambiarAvistamiento(); setFotoAvistamiento(''); }}><Text style={styles.compartirTexto}>Quitar foto</Text></TouchableOpacity></>}
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                    <TouchableOpacity accessibilityRole="button" disabled={ocupadoAvistamiento} style={[styles.compartirBoton, { flexGrow: 1 }]} onPress={() => { void elegirFotoAvistamiento('camara'); }}><Text style={styles.compartirTexto}>Tomar foto</Text></TouchableOpacity>
+                    <TouchableOpacity accessibilityRole="button" disabled={ocupadoAvistamiento} style={[styles.compartirBoton, { flexGrow: 1 }]} onPress={() => { void elegirFotoAvistamiento('galeria'); }}><Text style={styles.compartirTexto}>Subir foto</Text></TouchableOpacity>
+                  </View>
+                  <Text style={styles.formularioAyuda}>Al enviar, se guardará esta pista y se avisará al autor dentro de PetFind. No se modifica el reporte ni se confirma un reencuentro.</Text>
+                </>}
+              </ScrollView>
+              {ocupadoAvistamiento && <ActivityIndicator accessibilityLabel="Procesando avistamientos" color={PRIMARY_DARK} style={{ padding: 8 }} />}
+              {modoAvistamiento === 'enviar' && <TouchableOpacity accessibilityRole="button" disabled={ocupadoAvistamiento} style={[styles.compartirBoton, { backgroundColor: PRIMARY_DARK, opacity: ocupadoAvistamiento ? 0.5 : 1 }]} onPress={() => { void enviarAvistamiento(); }}><Text style={styles.textoBlanco}>{ocupadoAvistamiento ? 'Procesando…' : 'Enviar avistamiento'}</Text></TouchableOpacity>}
+            </View></View>
+            <Modal visible={mapaAvistamientoVisible} animationType="slide" onRequestClose={cerrarMapaAvistamiento}>
+              <SafeAreaView style={styles.selectorPantalla}>
+                <View style={styles.selectorCabecera}><Text accessibilityRole="header" style={styles.selectorTitulo}>¿Dónde viste la mascota?</Text><TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar mapa sin cambiar el avistamiento" style={styles.formularioCerrar} onPress={cerrarMapaAvistamiento}><Ico n="close" s={24} c="#222" /></TouchableOpacity></View>
+                <View style={styles.selectorAyuda}><Text style={styles.formularioAyuda}>El mapa parte de la zona del reporte. Mueve el pin al lugar donde la viste y confirma el punto.</Text><TouchableOpacity accessibilityRole="button" disabled={localizandoAvistamiento} style={styles.selectorCentrar} onPress={() => { void localizarAvistamiento(); }}><Text style={styles.compartirTexto}>{localizandoAvistamiento ? 'Buscando ubicación…' : 'Centrar en mi ubicación'}</Text></TouchableOpacity></View>
+                <View style={{ flex: 1 }}>{mapaAvistamientoVisible && <VistaHtml html={mapaAvistamientoHtml} scrollEnabled={false} onMensaje={moverMapaAvistamiento} />}</View>
+                <View style={styles.selectorPie}><Text style={styles.formularioAyuda}>Cancelar conserva el punto que habías confirmado.</Text><View style={{ flexDirection: 'row', gap: 10 }}>
+                  <TouchableOpacity accessibilityRole="button" style={styles.selectorCancelar} onPress={cerrarMapaAvistamiento}><Text>Cancelar</Text></TouchableOpacity>
+                  <TouchableOpacity accessibilityRole="button" disabled={!puntoAvistamiento || moviendoAvistamiento || localizandoAvistamiento} style={[styles.selectorConfirmar, { opacity: !puntoAvistamiento || moviendoAvistamiento || localizandoAvistamiento ? 0.5 : 1 }]} onPress={() => { if (puntoAvistamiento && !moviendoAvistamiento && !localizandoAvistamiento) { cambiarAvistamiento(); setCoordsAvistamiento(puntoAvistamiento); cerrarMapaAvistamiento(); } }}><Text style={styles.textoBlanco}>Usar este punto</Text></TouchableOpacity>
+                </View></View>
+              </SafeAreaView>
+            </Modal>
           </Modal>
           <Modal visible={denunciaVisible} transparent animationType="slide" onRequestClose={() => { if (!enviandoDenuncia) setDenunciaVisible(false); }}>
             <View style={styles.modalOverlay}><View style={[styles.modalContenido, { maxHeight: '90%', maxWidth: 500 }]}>
