@@ -860,60 +860,179 @@ type PistaCronologia = { id: string; fecha: string; zona: string };
 type PaginaCronologia = { items: PistaCronologia[]; siguiente: string | null };
 
 function Cronologia({ reporte }: { reporte: ReporteMascota }) {
+  const version = reporte.ultimoAvistamiento;
+  const clave = [
+    reporte.id,
+    version?.seconds ?? 0,
+    version?.nanoseconds ?? 0,
+  ].join('-');
+
+  return <ContenidoCronologia key={clave} reporte={reporte} />;
+}
+
+function ContenidoCronologia({
+  reporte,
+}: {
+  reporte: ReporteMascota;
+}) {
   const [paginas, setPaginas] = useState<PistaCronologia[]>([]);
-  const [peticion, setPeticion] = useState({ cursor: '', intento: 0 });
+  const [peticion, setPeticion] = useState({
+    cursor: '',
+    intento: 0,
+  });
   const [siguiente, setSiguiente] = useState<string | null>(null);
   const [ocupado, setOcupado] = useState(true);
   const [error, setError] = useState('');
-  const ultima = reporte.ultimoAvistamiento?.toMillis();
-  useEffect(() => {
-    setPeticion({ cursor: '', intento: 0 });
-  }, [reporte.id, ultima]);
 
   useEffect(() => {
     let vigente = true;
-    setOcupado(true);
-    setError('');
-    if (!peticion.cursor) { setPaginas([]); setSiguiente(null); }
-    const ruta = `?vista=cronologia&reporteId=${encodeURIComponent(reporte.id)}`
-      + (peticion.cursor ? `&cursor=${encodeURIComponent(peticion.cursor)}` : '');
+
+    const ruta =
+      `?vista=cronologia&reporteId=${encodeURIComponent(reporte.id)}` +
+      (peticion.cursor
+        ? `&cursor=${encodeURIComponent(peticion.cursor)}`
+        : '');
+
     pedirModeracion(ruta, undefined, AVISTAMIENTOS_URL)
       .then((pagina: PaginaCronologia) => {
         if (!vigente) return;
-        if (!Array.isArray(pagina.items) || pagina.items.some(p => typeof p.fecha !== 'string')) {
-          throw new Error('Actualiza el servidor de avistamientos para consultar la cronología.');
+
+        if (
+          !Array.isArray(pagina.items) ||
+          pagina.items.some((p) => typeof p.fecha !== 'string')
+        ) {
+          throw new Error(
+            'Actualiza el servidor de avistamientos para consultar la cronología.'
+          );
         }
-        setPaginas(prev => peticion.cursor ? [...prev, ...pagina.items] : pagina.items);
+
+        setPaginas((anteriores) =>
+          peticion.cursor
+            ? [...anteriores, ...pagina.items]
+            : pagina.items
+        );
         setSiguiente(pagina.siguiente);
-      }).catch(e => {
-        if (vigente) setError(e instanceof Error ? e.message : 'No se pudo cargar la cronología.');
-      }).finally(() => { if (vigente) setOcupado(false); });
-    return () => { vigente = false; };
+      })
+      .catch((e) => {
+        if (!vigente) return;
+
+        setError(
+          e instanceof Error
+            ? e.message
+            : 'No se pudo cargar la cronología.'
+        );
+      })
+      .finally(() => {
+        if (vigente) setOcupado(false);
+      });
+
+    return () => {
+      vigente = false;
+    };
   }, [reporte.id, peticion]);
 
-  const filas = paginas.map(p => ({ id: p.id, fecha: p.fecha, titulo: 'Avistamiento por verificar', zona: p.zona }));
-  filas.push({ id: 'inicio', fecha: reporte.fechaEvento || reporte.fechaPublicacion || '',
-    titulo: reporte.fechaEvento ? 'Pérdida reportada' : 'Publicación del reporte', zona: reporte.ubicacion });
-  if (reporte.estado === 'Reunida') filas.push({ id: 'cierre', fecha: reporte.fechaResolucion || '',
-    titulo: 'Reencuentro confirmado', zona: '' });
-  const momento = (f: typeof filas[number]) => Date.parse(f.fecha) || (f.id === 'cierre' ? Infinity : -Infinity);
+  const filas = paginas.map((p) => ({
+    id: p.id,
+    fecha: p.fecha,
+    titulo: 'Avistamiento por verificar',
+    zona: p.zona,
+  }));
+
+  filas.push({
+    id: 'inicio',
+    fecha: reporte.fechaEvento || reporte.fechaPublicacion || '',
+    titulo: reporte.fechaEvento
+      ? 'Pérdida reportada'
+      : 'Publicación del reporte',
+    zona: reporte.ubicacion,
+  });
+
+  if (reporte.estado === 'Reunida') {
+    filas.push({
+      id: 'cierre',
+      fecha: reporte.fechaResolucion || '',
+      titulo: 'Reencuentro confirmado',
+      zona: '',
+    });
+  }
+
+  const momento = (fila: (typeof filas)[number]) =>
+    Date.parse(fila.fecha) ||
+    (fila.id === 'cierre' ? Infinity : -Infinity);
+
   filas.sort((a, b) => momento(b) - momento(a));
 
-  return <View style={{ padding: 12 }}>
-    <Text accessibilityRole="header" style={styles.formularioEtiqueta}>Cronología del caso</Text>
-    {filas.map(f => <View key={f.id} style={{ paddingVertical: 8, borderBottomWidth: 1, borderColor: '#d6e4dd' }}>
-      <Text style={{ color: PRIMARY_DARK, fontWeight: '700' }}>{f.titulo}</Text>
-      <Text>{f.fecha ? fechaCompleta(f.fecha) : 'Fecha sin registrar'}</Text>
-      {!!f.zona && <Text>{f.zona}</Text>}
-    </View>)}
-    {ocupado && <ActivityIndicator accessibilityLabel="Cargando cronología" color={PRIMARY_DARK} />}
-    {!!error && <ErrorCampoReporte mensaje={error} />}
-    {!ocupado && !error && !paginas.length && <Text style={styles.formularioAyuda}>Todavía no hay avistamientos.</Text>}
-    {!ocupado && (!!error || !!siguiente) && <TouchableOpacity accessibilityRole="button" style={styles.compartirBoton}
-      onPress={() => setPeticion(p => ({ cursor: error ? p.cursor : siguiente || '', intento: p.intento + 1 }))}>
-      <Text style={styles.compartirTexto}>{error ? 'Reintentar' : 'Ver avistamientos anteriores'}</Text>
-    </TouchableOpacity>}
-  </View>;
+  const cargarOtraPagina = () => {
+    const cursor = error ? peticion.cursor : siguiente || '';
+
+    setOcupado(true);
+    setError('');
+    setPeticion((anterior) => ({
+      cursor,
+      intento: anterior.intento + 1,
+    }));
+  };
+
+  return (
+    <View style={{ padding: 12 }}>
+      <Text
+        accessibilityRole="header"
+        style={styles.formularioEtiqueta}
+      >
+        Cronología del caso
+      </Text>
+
+      {filas.map((fila) => (
+        <View
+          key={fila.id}
+          style={{
+            paddingVertical: 8,
+            borderBottomWidth: 1,
+            borderColor: '#d6e4dd',
+          }}
+        >
+          <Text style={{ color: PRIMARY_DARK, fontWeight: '700' }}>
+            {fila.titulo}
+          </Text>
+
+          <Text>
+            {fila.fecha
+              ? fechaCompleta(fila.fecha)
+              : 'Fecha sin registrar'}
+          </Text>
+
+          {!!fila.zona && <Text>{fila.zona}</Text>}
+        </View>
+      ))}
+
+      {ocupado && (
+        <ActivityIndicator
+          accessibilityLabel="Cargando cronología"
+          color={PRIMARY_DARK}
+        />
+      )}
+
+      {!!error && <ErrorCampoReporte mensaje={error} />}
+
+      {!ocupado && !error && paginas.length === 0 && (
+        <Text style={styles.formularioAyuda}>
+          Todavía no hay avistamientos.
+        </Text>
+      )}
+
+      {!ocupado && (!!error || !!siguiente) && (
+        <TouchableOpacity
+          accessibilityRole="button"
+          style={styles.compartirBoton}
+          onPress={cargarOtraPagina}
+        >
+          <Text style={styles.compartirTexto}>
+            {error ? 'Reintentar' : 'Ver avistamientos anteriores'}
+          </Text>
+        </TouchableOpacity>
+      )}
+    </View>
+  );
 }
 
 export default function App() {
