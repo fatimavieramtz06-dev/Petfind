@@ -1,0 +1,132 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function sesionIniciada() {
+      return request.auth != null;
+    }
+
+    // Mantiene los opcionales como texto: la app guarda fechaEvento en ISO UTC.
+    function opcionalesValidos(d) {
+      return d.get('colores', []) is list
+        && d.get('colores', []).size() <= 3
+        && d.get('colores', []).hasOnly(['Negro', 'Blanco', 'Café', 'Gris', 'Dorado', 'Crema', 'Naranja', 'Otro'])
+        && d.get('colores', []).toSet().size() == d.get('colores', []).size()
+        && d.get('tamano', '') in ['', 'Pequeño', 'Mediano', 'Grande']
+        && d.get('especieOtro', '') is string
+        && d.get('especieOtro', '').size() <= 60
+        && (d.especie != 'Otro' || d.get('especieOtro', '').matches('.*[^ ].*'))
+        && d.get('recompensa', '') is string
+        && d.get('recompensa', '').size() <= 100
+        && d.get('fechaEvento', '') is string
+        && (d.get('fechaEvento', '') == ''
+          || d.get('fechaEvento', '').matches('[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z'));
+    }
+
+    function camposValidos(d) {
+      return d.keys().hasAll([
+          'nombre', 'raza', 'tipo', 'especie', 'ubicacion', 'descripcion',
+          'foto', 'latitud', 'longitud', 'contactoNombre', 'telefono'
+        ])
+        && d.nombre is string && d.nombre.size() <= 60 && d.nombre.matches('.*[^ ].*')
+        && d.raza is string && d.raza.size() <= 60
+        && d.tipo in ['Perdida', 'Encontrada']
+        && d.especie in ['Perro', 'Gato', 'Otro']
+        && d.ubicacion is string && d.ubicacion.size() <= 150
+        && d.descripcion is string && d.descripcion.size() <= 500
+        // Valida el formato base64 esperado; no identifica el contenido de la foto.
+        && d.foto is string && d.foto.size() <= 800000
+        && d.foto.matches('data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}')
+        && d.latitud is number && d.latitud >= -90 && d.latitud <= 90
+        && d.longitud is number && d.longitud >= -180 && d.longitud <= 180
+        && d.contactoNombre is string && d.contactoNombre.size() <= 60
+        && d.contactoNombre.matches('.*[^ ].*')
+        && d.telefono is string && d.telefono.matches('[0-9]{10,15}')
+        && opcionalesValidos(d);
+    }
+
+    function reporteValido(d) {
+      return d.keys().hasAll(['autorId', 'creado'])
+        && d.keys().hasOnly([
+          'nombre', 'raza', 'tipo', 'especie', 'especieOtro', 'ubicacion',
+          'descripcion', 'foto', 'latitud', 'longitud', 'contactoNombre',
+          'telefono', 'fechaEvento', 'recompensa', 'colores', 'tamano', 'autorId', 'creado'
+        ])
+        && camposValidos(d)
+        && d.creado == request.time;
+    }
+
+    function edicionValida(nuevo, viejo) {
+      return nuevo.diff(viejo).affectedKeys().hasOnly([
+          'nombre', 'raza', 'tipo', 'especie', 'especieOtro', 'ubicacion',
+          'descripcion', 'foto', 'latitud', 'longitud', 'contactoNombre',
+          'telefono', 'fechaEvento', 'recompensa', 'colores', 'tamano', 'editado'
+        ])
+        && camposValidos(nuevo)
+        && nuevo.editado == request.time;
+    }
+
+    match /reportes/{id} {
+      allow read: if sesionIniciada();
+      allow create: if sesionIniciada()
+        && request.resource.data.autorId == request.auth.uid
+        && reporteValido(request.resource.data);
+      allow update: if sesionIniciada()
+        && resource.data.autorId == request.auth.uid
+        && resource.data.get('estado', 'Activo') == 'Activo'
+        && (
+          (
+            request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['estado', 'fechaResolucion'])
+            && request.resource.data.estado == 'Reunida'
+            && request.resource.data.fechaResolucion == request.time
+          )
+          || edicionValida(request.resource.data, resource.data)
+        );
+      allow delete: if sesionIniciada() && resource.data.autorId == request.auth.uid;
+    }
+
+    match /notificaciones/{id} {
+      allow read: if sesionIniciada() && resource.data.paraUid == request.auth.uid;
+      allow update: if sesionIniciada()
+        && resource.data.paraUid == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['leida'])
+        && request.resource.data.leida is bool;
+      allow delete: if sesionIniciada() && resource.data.paraUid == request.auth.uid;
+      allow create: if false;
+    }
+
+   // Sustituye únicamente el bloque match /guardados/{uid}/reportes/{reporteId}.
+match /guardados/{uid}/reportes/{reporteId} {
+function esMiCuenta() {
+return request.auth != null && request.auth.uid == uid;
+}
+
+allow read, delete: if esMiCuenta();
+allow create: if esMiCuenta()
+&& request.resource.data.keys().hasOnly(['creado'])
+&& request.resource.data.creado == request.time
+&& exists(/databases/$(database)/documents/reportes/$(reporteId));
+
+// Activación, desactivación y lectura de avisos de esta cuenta.
+allow update: if esMiCuenta()
+&& request.resource.data.diff(resource.data).affectedKeys()
+.hasOnly(['avisosDesde', 'vistoHasta'])
+&& (
+(request.resource.data.get('vistoHasta', null) == null
+&& (request.resource.data.get('avisosDesde', null) == null
+|| request.resource.data.avisosDesde == request.time))
+|| (request.resource.data.avisosDesde == resource.data.avisosDesde
+&& resource.data.avisosDesde is timestamp
+&& request.resource.data.vistoHasta is timestamp
+&& request.resource.data.vistoHasta >= resource.data.avisosDesde
+&& request.resource.data.vistoHasta <= request.time)
+);
+}
+
+    // Denegación explícita para procesados y cualquier colección no autorizada.
+    // El backend con Admin SDK se autoriza por IAM, no mediante estas reglas.
+    match /{documento=**} {
+      allow read, write: if false;
+    }
+  }
+}
