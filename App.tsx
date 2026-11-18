@@ -45,6 +45,8 @@ import {
   updateDoc,
   deleteDoc,
   where,
+  runTransaction,
+  type Timestamp,
 } from 'firebase/firestore';
 
 // Opciones rápidas para indicar cuándo se perdió / se vio la mascota
@@ -630,7 +632,7 @@ const AVISO_PRIVACIDAD: { t: string; x: string }[] = [
     t: 'Tus derechos',
     x: 'Puedes editar o borrar tus reportes desde la app. Para acceder a tus datos, corregirlos, cancelarlos u oponerte a su uso, o para eliminar tu cuenta, contacta al equipo' + (CORREO_PRIVACIDAD ? ` en ${CORREO_PRIVACIDAD}.` : '.'),
   },
-  { t: 'Avistamientos', x: 'Si envías un avistamiento, guardamos el lugar, fecha, comentario, foto opcional y el identificador de tu cuenta. El autor del reporte puede consultar el contenido; tu correo no se muestra. La ubicación exacta no es pública. No hay borrado automático de avistamientos; para solicitar su eliminación escribe al correo de contacto. Solo comparte información necesaria sobre la mascota.' },
+  { t: 'Avistamientos', x: 'Si envías un avistamiento, guardamos el lugar, fecha, comentario, foto opcional y el identificador de tu cuenta. El autor del reporte puede consultar el contenido; tu correo no se muestra. Quienes guarden el reporte pueden ver la fecha y la zona que decidas compartir en la cronología. El punto exacto, la referencia privada, el comentario y la foto solo se muestran al autor del reporte. No hay borrado automático de avistamientos; para solicitar su eliminación escribe al correo de contacto. Solo comparte información necesaria sobre la mascota.' },
   { t: 'Cambios', x: 'Si este aviso cambia, lo publicaremos en la app.' },
 ];
 
@@ -666,6 +668,9 @@ const PASOS_GUIA: { icono: string; mci?: boolean; titulo: string; texto: string 
 
 // Interfaces de TypeScript
 interface ReporteMascota {
+  ultimoAvistamiento?: Timestamp;
+  fechaResolucion?: string;
+  fechaPublicacion?: string;
   id: string;
   nombre: string;
   raza: string;
@@ -851,6 +856,66 @@ const generarMapaReportesHtml = (
 };
 
 
+type PistaCronologia = { id: string; fecha: string; zona: string };
+type PaginaCronologia = { items: PistaCronologia[]; siguiente: string | null };
+
+function Cronologia({ reporte }: { reporte: ReporteMascota }) {
+  const [paginas, setPaginas] = useState<PistaCronologia[]>([]);
+  const [peticion, setPeticion] = useState({ cursor: '', intento: 0 });
+  const [siguiente, setSiguiente] = useState<string | null>(null);
+  const [ocupado, setOcupado] = useState(true);
+  const [error, setError] = useState('');
+  const ultima = reporte.ultimoAvistamiento?.toMillis();
+  useEffect(() => {
+    setPeticion({ cursor: '', intento: 0 });
+  }, [reporte.id, ultima]);
+
+  useEffect(() => {
+    let vigente = true;
+    setOcupado(true);
+    setError('');
+    if (!peticion.cursor) { setPaginas([]); setSiguiente(null); }
+    const ruta = `?vista=cronologia&reporteId=${encodeURIComponent(reporte.id)}`
+      + (peticion.cursor ? `&cursor=${encodeURIComponent(peticion.cursor)}` : '');
+    pedirModeracion(ruta, undefined, AVISTAMIENTOS_URL)
+      .then((pagina: PaginaCronologia) => {
+        if (!vigente) return;
+        if (!Array.isArray(pagina.items) || pagina.items.some(p => typeof p.fecha !== 'string')) {
+          throw new Error('Actualiza el servidor de avistamientos para consultar la cronología.');
+        }
+        setPaginas(prev => peticion.cursor ? [...prev, ...pagina.items] : pagina.items);
+        setSiguiente(pagina.siguiente);
+      }).catch(e => {
+        if (vigente) setError(e instanceof Error ? e.message : 'No se pudo cargar la cronología.');
+      }).finally(() => { if (vigente) setOcupado(false); });
+    return () => { vigente = false; };
+  }, [reporte.id, peticion]);
+
+  const filas = paginas.map(p => ({ id: p.id, fecha: p.fecha, titulo: 'Avistamiento por verificar', zona: p.zona }));
+  filas.push({ id: 'inicio', fecha: reporte.fechaEvento || reporte.fechaPublicacion || '',
+    titulo: reporte.fechaEvento ? 'Pérdida reportada' : 'Publicación del reporte', zona: reporte.ubicacion });
+  if (reporte.estado === 'Reunida') filas.push({ id: 'cierre', fecha: reporte.fechaResolucion || '',
+    titulo: 'Reencuentro confirmado', zona: '' });
+  const momento = (f: typeof filas[number]) => Date.parse(f.fecha) || (f.id === 'cierre' ? Infinity : -Infinity);
+  filas.sort((a, b) => momento(b) - momento(a));
+
+  return <View style={{ padding: 12 }}>
+    <Text accessibilityRole="header" style={styles.formularioEtiqueta}>Cronología del caso</Text>
+    {filas.map(f => <View key={f.id} style={{ paddingVertical: 8, borderBottomWidth: 1, borderColor: '#d6e4dd' }}>
+      <Text style={{ color: PRIMARY_DARK, fontWeight: '700' }}>{f.titulo}</Text>
+      <Text>{f.fecha ? fechaCompleta(f.fecha) : 'Fecha sin registrar'}</Text>
+      {!!f.zona && <Text>{f.zona}</Text>}
+    </View>)}
+    {ocupado && <ActivityIndicator accessibilityLabel="Cargando cronología" color={PRIMARY_DARK} />}
+    {!!error && <ErrorCampoReporte mensaje={error} />}
+    {!ocupado && !error && !paginas.length && <Text style={styles.formularioAyuda}>Todavía no hay avistamientos.</Text>}
+    {!ocupado && (!!error || !!siguiente) && <TouchableOpacity accessibilityRole="button" style={styles.compartirBoton}
+      onPress={() => setPeticion(p => ({ cursor: error ? p.cursor : siguiente || '', intento: p.intento + 1 }))}>
+      <Text style={styles.compartirTexto}>{error ? 'Reintentar' : 'Ver avistamientos anteriores'}</Text>
+    </TouchableOpacity>}
+  </View>;
+}
+
 export default function App() {
   // Estado de Autenticación
   const [sesionIniciada, setSesionIniciada] = useState<boolean>(false);
@@ -894,14 +959,137 @@ export default function App() {
   const [notificaciones, setNotificaciones] = useState<Notificacion[]>([]);
   const [notifVisible, setNotifVisible] = useState<boolean>(false);
   const [perfilVisible, setPerfilVisible] = useState(false);
-  const [pestanaPerfil, setPestanaPerfil] = useState<'activos' | 'resueltos' | 'vencidos'>('activos');
+  const [datosGuardados, setDatosGuardados] = useState<{
+  uid: string;
+  ids: string[];
+  seguimiento?: Record<string, { desde?: Timestamp; visto?: Timestamp }>;
+  listo: boolean;
+  error: string;
+}>({
+  uid: '',
+  ids: [],
+  listo: false,
+  error: '',
+});
+
+const [guardadoOcupado, setGuardadoOcupado] = useState(false);
+const guardadoBloqueadoRef = useRef(false);
+const [intentoGuardados, setIntentoGuardados] = useState(0);
+
+const uidGuardados = sesionIniciada
+  ? auth.currentUser?.uid
+  : undefined;
+
+const favoritos = datosGuardados.uid === uidGuardados
+  ? datosGuardados
+  : { uid: '', ids: [], listo: false, error: '' };
+
+useEffect(() => {
+  if (!uidGuardados) return;
+
+  let activo = true;
+  const referencia = collection(
+    db, 'guardados', uidGuardados, 'reportes'
+  );
+
+  const cancelar = onSnapshot(
+    referencia,
+    (snapshot) => {
+      if (!activo) return;
+      setDatosGuardados({
+        uid: uidGuardados,
+        ids: snapshot.docs.map((documento) => documento.id),
+        seguimiento: Object.fromEntries(snapshot.docs.map(d => [
+          d.id, { desde: d.get('avisosDesde'), visto: d.get('vistoHasta') }
+        ])),
+        listo: true,
+        error: '',
+      });
+    },
+    () => {
+      if (!activo) return;
+      setDatosGuardados({
+        uid: uidGuardados,
+        ids: [],
+        listo: false,
+        error: 'No se pudieron cargar tus guardados.',
+      });
+    }
+  );
+
+  return () => {
+    activo = false;
+    cancelar();
+  };
+}, [uidGuardados, intentoGuardados]);
+
+const reintentarGuardados = () => {
+  setDatosGuardados({
+    uid: uidGuardados || '',
+    ids: [],
+    listo: false,
+    error: '',
+  });
+  setIntentoGuardados((anterior) => anterior + 1);
+};
+
+const cambiarGuardado = async (reporteId: string) => {
+  const uid = auth.currentUser?.uid;
+  if (!uid || !favoritos.listo || guardadoBloqueadoRef.current) {
+    return;
+  }
+
+  const guardar = !favoritos.ids.includes(reporteId);
+  guardadoBloqueadoRef.current = true;
+  setGuardadoOcupado(true);
+
+  try {
+    const referencia = doc(
+      db, 'guardados', uid, 'reportes', reporteId
+    );
+
+    await runTransaction(db, async (transaccion) => {
+      const existente = await transaccion.get(referencia);
+
+      if (guardar && !existente.exists()) {
+        transaccion.set(referencia, {
+          creado: serverTimestamp(),
+        });
+      } else if (!guardar && existente.exists()) {
+        transaccion.delete(referencia);
+      }
+    });
+  } catch {
+    if (auth.currentUser?.uid === uid) {
+      avisar(
+        'No se pudo actualizar',
+        'Revisa tu conexión y vuelve a intentarlo. ' +
+        'Si el reporte fue eliminado, ya no se puede guardar.'
+      );
+    }
+  } finally {
+    guardadoBloqueadoRef.current = false;
+    setGuardadoOcupado(false);
+  }
+};
+  
+  const [pestanaPerfil, setPestanaPerfil] = useState<'activos' | 'resueltos' | 'vencidos' | 'guardados'>('activos');
   const uidPerfil = auth.currentUser?.uid;
   const misReportes = uidPerfil ? reportes.filter((r) => r.autorId === uidPerfil) : [];
   const gruposPerfil = {
-    activos: misReportes.filter((r) => r.estado !== 'Reunida' && r.estado !== 'Vencida'),
-    resueltos: misReportes.filter((r) => r.estado === 'Reunida'),
-    vencidos: misReportes.filter((r) => r.estado === 'Vencida'),
-  };
+  activos: misReportes.filter(
+    (r) => r.estado !== 'Reunida' && r.estado !== 'Vencida'
+  ),
+  resueltos: misReportes.filter(
+    (r) => r.estado === 'Reunida'
+  ),
+  vencidos: misReportes.filter(
+    (r) => r.estado === 'Vencida'
+  ),
+  guardados: reportes.filter(
+    (r) => favoritos.ids.includes(r.id)
+  ),
+};
   const [privacidadVisible, setPrivacidadVisible] = useState<boolean>(false);
   const [aceptaPrivacidad, setAceptaPrivacidad] = useState<boolean>(false);
 
@@ -1050,7 +1238,40 @@ export default function App() {
     irAPasoReporte(Math.min(2, pasoReporte + 1));
   };
 
-  const sinLeer = notificaciones.filter((x) => !x.leida).length;
+  const seguimiento = datosGuardados.uid === uidGuardados ? datosGuardados.seguimiento : undefined;
+  const avisosSeguidos = reportes.filter(r => {
+    const pref = seguimiento?.[r.id];
+    const ultima = r.ultimoAvistamiento;
+    return pref?.desde && ultima && ultima.valueOf() > pref.desde.valueOf()
+      && (!pref.visto || ultima.valueOf() > pref.visto.valueOf());
+  }).sort((a, b) => b.ultimoAvistamiento!.toMillis() - a.ultimoAvistamiento!.toMillis());
+  const sinLeer = notificaciones.filter((x) => !x.leida).length + avisosSeguidos.length;
+  const [cronologiaAbierta, setCronologiaAbierta] = useState(false);
+  const [zonaPublica, setZonaPublica] = useState('');
+  const cambiarAvisos = async (id: string, activar: boolean) => {
+    if (!uidGuardados || guardadoBloqueadoRef.current) return;
+    guardadoBloqueadoRef.current = true;
+    setGuardadoOcupado(true);
+    try {
+      await updateDoc(doc(db, 'guardados', uidGuardados, 'reportes', id), {
+        avisosDesde: activar ? serverTimestamp() : null, vistoHasta: null
+      });
+    } catch { avisar('No se pudieron cambiar los avisos', 'Verifica tu conexión y que el reporte siga guardado.'); }
+    finally { guardadoBloqueadoRef.current = false; setGuardadoOcupado(false); }
+  };
+  const leerSeguimiento = async (r: ReporteMascota) => {
+    if (!uidGuardados || !r.ultimoAvistamiento) return;
+    const ref = doc(db, 'guardados', uidGuardados, 'reportes', r.id);
+    const hasta = r.ultimoAvistamiento;
+    await runTransaction(db, async tx => {
+      const pref = await tx.get(ref);
+      const desde = pref.get('avisosDesde') as Timestamp | undefined;
+      const visto = pref.get('vistoHasta') as Timestamp | undefined;
+      if (desde && hasta.valueOf() > desde.valueOf() && (!visto || hasta.valueOf() > visto.valueOf())) {
+        tx.update(ref, { vistoHasta: hasta });
+      }
+    });
+  };
   const pasoActual = PASOS_GUIA[pasoGuia] ?? PASOS_GUIA[0];
   const esUltimoPaso = pasoGuia >= PASOS_GUIA.length - 1;
 
@@ -1086,6 +1307,9 @@ export default function App() {
             fechaEvento: x.fechaEvento ?? '',
             recompensa: x.recompensa ?? '',
             estado: x.estado ?? 'Activo',
+            ultimoAvistamiento: x.ultimoAvistamiento,
+            fechaResolucion: x.fechaResolucion?.toDate?.().toISOString(),
+            fechaPublicacion: x.creado?.toDate?.().toISOString(),
             autorId: x.autorId ?? null,
             ubicacion: x.ubicacion ?? '',
             descripcion: x.descripcion ?? '',
@@ -1254,7 +1478,7 @@ export default function App() {
   const marcarTodasLeidas = async () => {
     try {
       await Promise.all(
-        notificaciones.filter((x) => !x.leida).map((x) => updateDoc(doc(db, 'notificaciones', x.id), { leida: true }))
+        [...avisosSeguidos.map(leerSeguimiento), ...notificaciones.filter((x) => !x.leida).map((x) => updateDoc(doc(db, 'notificaciones', x.id), { leida: true }))]
       );
     } catch {}
   };
@@ -1356,6 +1580,12 @@ export default function App() {
       // Preparar la nueva sesión antes de activar las suscripciones.
       setCargandoReportes(true);
       setNotificaciones([]);
+      setDatosGuardados({
+      uid: '',
+      ids: [],
+      listo: false,
+      error: '',
+      });
       setMostrarPassword(false);
       setSesionIniciada(true);
     } catch (error: any) {
@@ -1997,6 +2227,7 @@ export default function App() {
   };
   const abrirAvistamientos = (r: ReporteMascota) => {
     const propio = r.autorId === auth.currentUser?.uid;
+    setZonaPublica('');
     setModoAvistamiento(propio ? 'recibidos' : 'enviar'); setErrorAvistamiento('');
     setComentarioAvistamiento(''); setReferenciaAvistamiento(''); setFotoAvistamiento('');
     setCoordsAvistamiento(null); setCuandoAvistamiento('ahora'); solicitudAvistamiento.current = null;
@@ -2005,7 +2236,7 @@ export default function App() {
   };
   const cerrarAvistamiento = async () => {
     if (avistamientoBloqueado.current) return;
-    if (modoAvistamiento === 'enviar' && (comentarioAvistamiento || referenciaAvistamiento || fotoAvistamiento || coordsAvistamiento)) {
+    if (modoAvistamiento === 'enviar' && (zonaPublica || comentarioAvistamiento || referenciaAvistamiento || fotoAvistamiento || coordsAvistamiento)) {
       if (!await confirmar('¿Descartar avistamiento?', 'Los datos que escribiste no se enviarán.')) return;
     }
     consultaAvistamientos.current++; setAvistamientoVisible(false); setOcupadoAvistamiento(false);
@@ -2069,14 +2300,15 @@ export default function App() {
     if (!solicitudAvistamiento.current) solicitudAvistamiento.current = { id: `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}_${Math.random().toString(36).slice(2)}`, fecha: fechaEventoAlGuardar(OPCIONES_CUANDO.find(o => o.id === cuandoAvistamiento)?.min || 0) };
     const solicitud = solicitudAvistamiento.current;
     try {
-      await pedirModeracion('', { solicitudId: solicitud.id, reporteId: mascotaDetalle.id, comentario: comentarioAvistamiento.trim(), referencia: referenciaAvistamiento.trim(), latitud: coordsAvistamiento.lat, longitud: coordsAvistamiento.lng, fechaEvento: solicitud.fecha, foto: fotoAvistamiento }, AVISTAMIENTOS_URL);
+      await pedirModeracion('', { solicitudId: solicitud.id, zonaPublica: zonaPublica.trim(), reporteId: mascotaDetalle.id, comentario: comentarioAvistamiento.trim(), referencia: referenciaAvistamiento.trim(), latitud: coordsAvistamiento.lat, longitud: coordsAvistamiento.lng, fechaEvento: solicitud.fecha, foto: fotoAvistamiento }, AVISTAMIENTOS_URL);
       setAvistamientoVisible(false); setFotoAvistamiento(''); setComentarioAvistamiento(''); setCoordsAvistamiento(null);
       avisar('Avistamiento enviado', 'El autor recibió un aviso en PetFind. Tu información es una pista por verificar; no confirma la identidad de la mascota.');
     } catch (e) { setErrorAvistamiento(e instanceof Error ? e.message : 'No se pudo enviar. Puedes volver a intentarlo sin duplicar el envío.'); avistamientoScroll.current?.scrollTo({ y: 0, animated: true }); }
     finally { avistamientoBloqueado.current = false; setOcupadoAvistamiento(false); }
   };
 
-  const abrirDetalle = (mascota: ReporteMascota) => {
+  const abrirDetalle = (mascota: ReporteMascota, mostrarCronologia = false) => {
+    setCronologiaAbierta(mostrarCronologia);
     setMascotaDetalle(mascota);
     setDetalleVisible(true);
   };
@@ -2847,18 +3079,71 @@ export default function App() {
               </View>
               <Text style={styles.perfilNombre}>Mis reportes</Text>
               <Text style={[styles.perfilTexto, { marginTop: 4, marginBottom: 14 }]}>Aquí puedes administrar los reportes que publicaste con esta cuenta.</Text>
-              <View style={styles.perfilPestanas}>
-                {(['activos', 'resueltos', 'vencidos'] as const).map((pestana) => (
-                  <TouchableOpacity key={pestana} accessibilityRole="tab" accessibilityState={{ selected: pestanaPerfil === pestana }} onPress={() => setPestanaPerfil(pestana)} style={[styles.perfilPestana, pestanaPerfil === pestana && styles.perfilPestanaActiva]}>
-                    <Text style={{ color: pestanaPerfil === pestana ? '#fff' : PRIMARY_DARK, fontWeight: '700', textAlign: 'center', fontSize: 13 }}>
-                      {pestana === 'activos' ? 'Activos' : pestana === 'resueltos' ? 'Resueltos' : 'Vencidos'} ({gruposPerfil[pestana].length})
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-              {cargandoReportes ? (
+              <View
+              style={[
+              styles.perfilPestanas,
+              { flexWrap: 'wrap', gap: 8 },
+              ]}
+>
+             {(
+            ['activos', 'resueltos', 'vencidos', 'guardados'] as const
+         ).map((pestana) => (
+    <TouchableOpacity
+      key={pestana}
+      accessibilityRole="tab"
+      accessibilityState={{
+        selected: pestanaPerfil === pestana,
+      }}
+      onPress={() => setPestanaPerfil(pestana)}
+      style={[
+        styles.perfilPestana,
+        { minWidth: 110 },
+        pestanaPerfil === pestana &&
+          styles.perfilPestanaActiva,
+      ]}
+    >
+      <Text
+        style={{
+          color: pestanaPerfil === pestana
+            ? '#fff'
+            : PRIMARY_DARK,
+          fontWeight: '700',
+          textAlign: 'center',
+          fontSize: 13,
+        }}
+      >
+        {pestana === 'guardados'
+          ? `Guardados (${favoritos.ids.length})`
+          : `${
+              pestana === 'activos'
+                ? 'Activos'
+                : pestana === 'resueltos'
+                ? 'Resueltos'
+                : 'Vencidos'
+            } (${gruposPerfil[pestana].length})`}
+      </Text>
+    </TouchableOpacity>
+  ))}
+</View>
+              {pestanaPerfil === 'guardados' && favoritos.error ? (
+  <View>
+    <ErrorCampoReporte mensaje={favoritos.error} />
+    <TouchableOpacity
+      accessibilityRole="button"
+      style={styles.compartirBoton}
+      onPress={reintentarGuardados}
+    >
+      <Text style={styles.compartirTexto}>Reintentar</Text>
+    </TouchableOpacity>
+  </View>
+) : cargandoReportes ||
+    (pestanaPerfil === 'guardados' && !favoritos.listo) ? (
                 <ActivityIndicator color={PRIMARY_DARK} style={{ marginVertical: 28 }} accessibilityLabel="Cargando mis reportes" />
-              ) : gruposPerfil[pestanaPerfil].length === 0 ? (
+              ) : (
+              pestanaPerfil === 'guardados'
+             ? favoritos.ids.length === 0
+             : gruposPerfil[pestanaPerfil].length === 0
+             ) ? (
                 <View style={styles.perfilVacio}>
                   <Ico n="document-text-outline" s={36} c="#78877f" />
                   <Text style={[styles.perfilNombre, { marginTop: 10 }]}>No tienes reportes {pestanaPerfil}</Text>
@@ -2875,20 +3160,104 @@ export default function App() {
                     </View>
                   </View>
                   <View style={styles.perfilAcciones}>
-                    <TouchableOpacity style={styles.perfilAccion} accessibilityRole="button" accessibilityLabel={`Ver reporte de ${r.nombre}`} onPress={() => { setPerfilVisible(false); setTimeout(() => abrirDetalle(r), Platform.OS === 'ios' ? 450 : 0); }}>
-                      <Text style={styles.perfilAccionTexto}>Ver reporte</Text>
-                    </TouchableOpacity>
-                    {r.estado !== 'Reunida' && r.estado !== 'Vencida' && (
-                      <TouchableOpacity style={styles.perfilAccion} accessibilityRole="button" accessibilityLabel={`Editar reporte de ${r.nombre}`} onPress={() => { setPerfilVisible(false); setTimeout(() => abrirEdicion(r), Platform.OS === 'ios' ? 450 : 0); }}>
-                        <Text style={styles.perfilAccionTexto}>Editar</Text>
-                      </TouchableOpacity>
-                    )}
-                    <TouchableOpacity style={styles.perfilAccion} accessibilityRole="button" accessibilityLabel={`Eliminar reporte de ${r.nombre}`} onPress={() => eliminarReporte(r)}>
-                      <Text style={[styles.perfilAccionTexto, { color: '#b42318' }]}>Eliminar</Text>
-                    </TouchableOpacity>
-                  </View>
+  <TouchableOpacity
+    style={styles.perfilAccion}
+    accessibilityRole="button"
+    onPress={() => {
+      setPerfilVisible(false);
+      setTimeout(
+        () => abrirDetalle(r),
+        Platform.OS === 'ios' ? 450 : 0
+      );
+    }}
+  >
+    <Text style={styles.perfilAccionTexto}>
+      Ver reporte
+    </Text>
+  </TouchableOpacity>
+
+  {pestanaPerfil === 'guardados' ? (
+    <TouchableOpacity
+      style={styles.perfilAccion}
+      accessibilityRole="button"
+      disabled={guardadoOcupado}
+      onPress={() => {
+        void cambiarGuardado(r.id);
+      }}
+    >
+      <Text style={styles.perfilAccionTexto}>
+        Quitar de guardados
+      </Text>
+    </TouchableOpacity>
+  ) : (
+    <>
+      {r.estado !== 'Reunida' && r.estado !== 'Vencida' && (
+        <TouchableOpacity
+          style={styles.perfilAccion}
+          accessibilityRole="button"
+          onPress={() => {
+            setPerfilVisible(false);
+            setTimeout(
+              () => abrirEdicion(r),
+              Platform.OS === 'ios' ? 450 : 0
+            );
+          }}
+        >
+          <Text style={styles.perfilAccionTexto}>
+            Editar
+          </Text>
+        </TouchableOpacity>
+      )}
+
+      <TouchableOpacity
+        style={styles.perfilAccion}
+        accessibilityRole="button"
+        onPress={() => eliminarReporte(r)}
+      >
+        <Text
+          style={[
+            styles.perfilAccionTexto,
+            { color: '#b42318' },
+          ]}
+        >
+          Eliminar
+        </Text>
+      </TouchableOpacity>
+    </>
+  )}
+</View>
                 </View>
               ))}
+              
+              {pestanaPerfil === 'guardados' &&
+  favoritos.listo &&
+  !cargandoReportes &&
+  favoritos.ids
+    .filter((id) => !reportes.some((r) => r.id === id))
+    .map((id) => (
+      <View key={id} style={styles.perfilReporte}>
+        <Text style={styles.perfilNombre}>
+          Reporte no disponible
+        </Text>
+        <Text style={styles.perfilTexto}>
+          No aparece en la lista actual. Puedes quitar
+          esta referencia de tus guardados.
+        </Text>
+        <TouchableOpacity
+          accessibilityRole="button"
+          disabled={guardadoOcupado}
+          style={styles.perfilAccion}
+          onPress={() => {
+            void cambiarGuardado(id);
+          }}
+        >
+          <Text style={styles.perfilAccionTexto}>
+            Quitar de guardados
+          </Text>
+        </TouchableOpacity>
+      </View>
+    ))}
+              
               <Text style={[styles.perfilTexto, { fontSize: 12, marginTop: 4, marginBottom: 18 }]}>Este listado no es un historial permanente. Los reportes resueltos se borran a los 30 días; los activos pasan a vencidos a los 90 días.</Text>
               {esAdmin && <TouchableOpacity style={[styles.perfilEnlace, { marginBottom: 10 }]} accessibilityRole="button" accessibilityLabel="Administración: revisar denuncias" onPress={() => {
                 setPerfilVisible(false); setTimeout(() => { setModeracionVisible(true); void cargarDenuncias('pendiente'); }, Platform.OS === 'ios' ? 450 : 0);
@@ -2963,18 +3332,29 @@ export default function App() {
                 <Ico n="close" s={22} c="#333" />
               </TouchableOpacity>
             </View>
-            {notificaciones.length === 0 ? (
+            {notificaciones.length === 0 && avisosSeguidos.length === 0 ? (
               <View style={{ alignItems: 'center', paddingVertical: 28 }}>
                 <Ico n="notifications-outline" s={40} c="#8a9590" />
                 <Text style={{ fontSize: 16, fontWeight: 'bold', color: '#222', marginTop: 10, marginBottom: 4 }}>
                   Aún no tienes avisos
                 </Text>
                 <Text style={{ fontSize: 13, color: '#555', textAlign: 'center', maxWidth: 280, lineHeight: 19 }}>
-                  Aquí recibirás avisos de posibles coincidencias y de avistamientos para tus mascotas perdidas.
+                  Aquí aparecen tus coincidencias, avistamientos recibidos y novedades de los reportes que sigues.
                 </Text>
               </View>
             ) : (
               <ScrollView>
+                {avisosSeguidos.map(r => (
+                  <TouchableOpacity key={r.id} accessibilityRole="button" style={[styles.compartirBoton, { marginBottom: 10 }]}
+                    onPress={() => {
+                      void leerSeguimiento(r).catch(() => avisar('Aviso pendiente', 'No se pudo marcar como leído.'));
+                      setNotifVisible(false);
+                      setTimeout(() => abrirDetalle(r, true), Platform.OS === 'ios' ? 450 : 0);
+                    }}>
+                    <Text style={styles.compartirTexto}>Nuevo avistamiento · {r.nombre}</Text>
+                    <Text>Ver cronología del reporte guardado</Text>
+                  </TouchableOpacity>
+                ))}
                 {notificaciones.some((nt) => nt.tipo !== 'cierre' && nt.tipo !== 'moderacion' && nt.tipo !== 'avistamiento') && <Text style={styles.avisoIa}>{AVISO_IA}</Text>}
                 {notificaciones.map((nt) => (
                   <View
@@ -3571,6 +3951,78 @@ export default function App() {
                     style={[styles.compartirBoton, { marginTop: 14, marginBottom: 8 }]}>
                     <IcoTexto n="share-social-outline" s={20} c={PRIMARY_DARK} centrado textoStyle={{ color: PRIMARY_DARK, fontSize: 14, fontWeight: '700' }}>Compartir reporte</IcoTexto>
                   </TouchableOpacity>
+                  <TouchableOpacity
+  accessibilityRole="button"
+  accessibilityState={{
+    disabled: !favoritos.listo || guardadoOcupado,
+  }}
+  disabled={!favoritos.listo || guardadoOcupado}
+  style={[
+    styles.compartirBoton,
+    { marginBottom: 8 },
+  ]}
+  onPress={() => {
+    if (mascotaDetalle) {
+      void cambiarGuardado(mascotaDetalle.id);
+    }
+  }}
+>
+  <IcoTexto
+    n={
+      favoritos.ids.includes(mascotaDetalle.id)
+        ? 'bookmark'
+        : 'bookmark-outline'
+    }
+    s={20}
+    c={PRIMARY_DARK}
+    centrado
+    textoStyle={{
+      color: PRIMARY_DARK,
+      fontWeight: '700',
+    }}
+  >
+    {guardadoOcupado
+      ? 'Actualizando…'
+      : !favoritos.listo
+      ? 'Guardados no disponibles'
+      : favoritos.ids.includes(mascotaDetalle.id)
+      ? 'Quitar de guardados'
+      : 'Guardar reporte'}
+  </IcoTexto>
+</TouchableOpacity>
+
+{mascotaDetalle.tipo === 'Perdida' && favoritos.ids.includes(mascotaDetalle.id)
+  && mascotaDetalle.autorId !== auth.currentUser?.uid && mascotaDetalle.estado !== 'Reunida' && mascotaDetalle.estado !== 'Vencida' && (
+  <TouchableOpacity accessibilityRole="switch" accessibilityState={{ checked: !!seguimiento?.[mascotaDetalle.id]?.desde, disabled: guardadoOcupado }}
+    disabled={guardadoOcupado} style={styles.compartirBoton}
+    onPress={() => void cambiarAvisos(mascotaDetalle.id, !seguimiento?.[mascotaDetalle.id]?.desde)}>
+    <Text style={styles.compartirTexto}>Avisarme si la ven · {seguimiento?.[mascotaDetalle.id]?.desde ? 'Activado' : 'Desactivado'}</Text>
+  </TouchableOpacity>
+)}
+{mascotaDetalle.tipo === 'Perdida' && (favoritos.ids.includes(mascotaDetalle.id) || mascotaDetalle.autorId === auth.currentUser?.uid) && (
+  <View style={{ marginVertical: 10 }}>
+    <TouchableOpacity accessibilityRole="button" accessibilityState={{ expanded: cronologiaAbierta }}
+      style={styles.compartirBoton} onPress={() => setCronologiaAbierta(v => !v)}>
+      <Text style={styles.compartirTexto}>{cronologiaAbierta ? 'Ocultar cronología' : 'Ver cronología del caso'}</Text>
+    </TouchableOpacity>
+    {detalleVisible && cronologiaAbierta && <Cronologia key={mascotaDetalle.id}
+      reporte={reportes.find(r => r.id === mascotaDetalle.id) || mascotaDetalle} />}
+  </View>
+)}
+{!!favoritos.error && (
+  <View>
+    <ErrorCampoReporte mensaje={favoritos.error} />
+    <TouchableOpacity
+      accessibilityRole="button"
+      style={styles.compartirBoton}
+      onPress={reintentarGuardados}
+    >
+      <Text style={styles.compartirTexto}>
+        Reintentar carga de guardados
+      </Text>
+    </TouchableOpacity>
+  </View>
+)}
                   {mascotaDetalle.tipo === 'Perdida' && (mascotaDetalle.autorId === auth.currentUser?.uid || (mascotaDetalle.estado !== 'Reunida' && mascotaDetalle.estado !== 'Vencida')) && <TouchableOpacity accessibilityRole="button" style={[styles.compartirBoton, { marginBottom: 8 }]} onPress={() => abrirAvistamientos(mascotaDetalle)}><IcoTexto n="eye-outline" s={20} c={PRIMARY_DARK} centrado textoStyle={{ color: PRIMARY_DARK, fontWeight: '700' }}>{mascotaDetalle.autorId === auth.currentUser?.uid ? 'Avistamientos recibidos' : 'Reportar avistamiento'}</IcoTexto></TouchableOpacity>}
                   {mascotaDetalle.autorId !== auth.currentUser?.uid && <TouchableOpacity accessibilityRole="button" style={{ minHeight: 44, justifyContent: 'center', alignItems: 'center', marginBottom: 8 }} onPress={() => {
                     setMotivoDenuncia(MOTIVOS_DENUNCIA[0]); setDetalleDenuncia(''); setErrorDenuncia(''); setDenunciaVisible(true);
@@ -3748,7 +4200,11 @@ export default function App() {
                   <Text style={styles.formularioEtiqueta}>Lugar del avistamiento *</Text>
                   <TouchableOpacity accessibilityRole="button" disabled={ocupadoAvistamiento} style={styles.compartirBoton} onPress={abrirMapaAvistamiento}><Text style={styles.compartirTexto}>{coordsAvistamiento ? 'Ajustar punto confirmado en el mapa' : 'Elegir dónde viste la mascota'}</Text></TouchableOpacity>
                   {coordsAvistamiento && <><View style={{ height: 150 }}><VistaHtml html={generarSelectorMapaHtml(coordsAvistamiento, coordsAvistamiento)} scrollEnabled={false} /></View><Text style={styles.formularioAyuda}>Punto confirmado: {coordsAvistamiento.lat.toFixed(5)}, {coordsAvistamiento.lng.toFixed(5)}</Text></>}
-                  <Text style={styles.formularioEtiqueta}>Referencia del lugar (opcional)</Text>
+                  <Text style={styles.formularioEtiqueta}>Colonia o zona para la cronología (opcional)</Text>
+                  <Text style={styles.formularioAyuda}>Quienes guarden el reporte podrán ver esta zona y la hora. Escribe solo una colonia, sin domicilios ni datos de contacto.</Text>
+                  <TextInput accessibilityLabel="Zona compartida con seguidores" style={styles.input} editable={!ocupadoAvistamiento} value={zonaPublica} maxLength={80}
+                    placeholder="Ej. Colonia Centro" onChangeText={v => { cambiarAvistamiento(); setZonaPublica(v); }} />
+                  <Text style={styles.formularioEtiqueta}>Referencia privada para el autor</Text>
                   <TextInput accessibilityLabel="Referencia del lugar del avistamiento" style={styles.input} editable={!ocupadoAvistamiento} maxLength={150} value={referenciaAvistamiento} onChangeText={v => { cambiarAvistamiento(); setReferenciaAvistamiento(v); }} placeholder="Ej. Frente al parque, junto a la entrada" />
                   <Text style={styles.formularioEtiqueta}>¿Qué viste? *</Text>
                   <TextInput accessibilityLabel="Descripción del avistamiento, mínimo diez caracteres" style={[styles.input, { minHeight: 90, textAlignVertical: 'top' }]} editable={!ocupadoAvistamiento} multiline maxLength={500} value={comentarioAvistamiento} onChangeText={v => { cambiarAvistamiento(); setComentarioAvistamiento(v); }} placeholder="Describe las señas, hacia dónde iba y qué te hizo pensar que era esta mascota." />
