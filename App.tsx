@@ -11,6 +11,7 @@ import {
   SafeAreaView,
   StatusBar,
   Keyboard,
+  KeyboardAvoidingView,
   Alert,
   ActivityIndicator,
   Platform,
@@ -26,9 +27,11 @@ import {
   sendPasswordResetEmail,
   type PasswordPolicy,
 } from 'firebase/auth';
+import { SafeAreaProvider, SafeAreaView as SafeAreaPantalla } from 'react-native-safe-area-context';
 import { auth, db } from './firebaseConfig';
 import { WebView } from 'react-native-webview';
 import * as ImagePicker from 'expo-image-picker';
+import * as ImageManipulator from 'expo-image-manipulator';
 import * as Location from 'expo-location';
 import * as Sharing from 'expo-sharing';
 import { captureRef } from 'react-native-view-shot';
@@ -402,7 +405,7 @@ const generarMiniMapaHtml = (lat: number, lng: number, color: string): string =>
     <head>
       <meta name="viewport" content="width=device-width, initial-scale=1.0" />
       <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-      <style>html, body, #mapa { height: 100%; margin: 0; padding: 0; }</style>
+      <style>html, body, #mapa { height: 100%; margin: 0; padding: 0; }.pin-mascota { background: transparent; border: 0; } .pin-mascota svg { width: 44px; height: 48px; display: block; filter: drop-shadow(0 2px 2px #0004); }</style>
     </head>
     <body>
       <div id="mapa"></div>
@@ -412,8 +415,15 @@ const generarMiniMapaHtml = (lat: number, lng: number, color: string): string =>
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
           attribution: '&copy; OpenStreetMap contributors'
         }).addTo(mapa);
-        L.circleMarker([${lat}, ${lng}], {
-          radius: 11, fillColor: '${color}', color: '#fff', weight: 3, fillOpacity: 1
+        const colorPin = ${JSON.stringify(color).replace(/</g, '\\u003c')};
+        const pin = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 48" aria-hidden="true">' +
+                    '<path d="M22 46C18 40 5 29 5 19a17 17 0 1 1 34 0c0 10-13 21-17 27Z" fill="' + colorPin + '" stroke="white" stroke-width="2.5"/>' +
+                    '<g fill="white"><ellipse cx="14" cy="17" rx="2.6" ry="3.3" transform="rotate(-25 14 17)"/>' +
+                    '<ellipse cx="19" cy="12" rx="2.6" ry="3.3"/><ellipse cx="25" cy="12" rx="2.6" ry="3.3"/>' +
+                    '<ellipse cx="30" cy="17" rx="2.6" ry="3.3" transform="rotate(25 30 17)"/>' +
+                    '<path d="M16 25c0-3 3-6 6-6s6 3 6 6c0 5-4 3-6 3s-6 2-6-3Z"/></g></svg>';
+        L.marker([${lat}, ${lng}], { title: 'Ubicación del reporte', alt: 'Ubicación del reporte',
+          icon: L.divIcon({ className: 'pin-mascota', html: pin, iconSize: [44, 48], iconAnchor: [22, 46] })
         }).addTo(mapa);
       </script>
     </body>
@@ -748,7 +758,9 @@ const requisitosDePassword = (politica: PasswordPolicy, incluirMaximo = true): s
   // Genera el HTML del mapa con Leaflet + OpenStreetMap (gratis, sin API key)
 const generarMapaReportesHtml = (
   reportes: ReporteMascota[],
-  miUbicacion: { lat: number; lng: number } | null
+  miUbicacion: { lat: number; lng: number } | null,
+  centrarEnMiUbicacion = false,
+  buscandoUbicacion = false
 ): string => {
     const centro =
       miUbicacion ??
@@ -760,8 +772,13 @@ const generarMapaReportesHtml = (
       lat: r.latitud,
       lng: r.longitud,
       color: r.tipo === 'Perdida' ? '#e53935' : PRIMARY_COLOR,
-      titulo: r.nombre,
-      detalle: `${r.especie === 'Otro' && r.especieOtro ? r.especieOtro + ' · ' : ''}${r.raza} · ${r.ubicacion}${r.fechaEvento ? ' · ' + tiempoRelativo(r.fechaEvento) : ''}`,
+      titulo: r.nombre || 'Mascota sin nombre',
+      foto: r.foto,
+      tipo: r.tipo,
+      zona: r.ubicacion,
+      fecha: r.fechaEvento ? tiempoRelativo(r.fechaEvento) : '',
+
+      detalle: `${r.especie === 'Otro' && r.especieOtro ? r.especieOtro : r.especie} · ${razaVisible(r.raza)}`,
     }));
 
     return `
@@ -771,15 +788,59 @@ const generarMapaReportesHtml = (
           <meta name="viewport" content="width=device-width, initial-scale=1.0" />
           <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
           <style>
-            html, body, #mapa { height: 100%; margin: 0; padding: 0; }
-            .leyenda-mapa { background: #fff; padding: 8px 10px; border-radius: 8px; font: 13px/20px sans-serif; color: #333; box-shadow: 0 1px 5px #0003; }
-            .ver-reporte { display: block; margin-top: 10px; min-height: 44px; padding: 8px 16px; border: 0; border-radius: 7px; background: #007d54; color: #fff; font: 600 14px sans-serif; cursor: pointer; }
+            html, body { height: 100%; margin: 0; padding: 0; }
+            body { display: flex; flex-direction: column; }
+            #mapa { flex: 1; min-height: 0; }
+            .resumen-mapa { flex-shrink: 0; padding: 9px 14px; background: #007d54; color: #fff; font: 600 13px/18px sans-serif; }
+            .filtros-mapa { flex-shrink: 0; height: 52px; box-sizing: border-box; display: flex; gap: 6px; align-items: center; padding: 4px 10px; background: #fff; }
+            .filtros-mapa button { flex: 1; min-height: 44px; border: 1px solid #cce0d5; border-radius: 22px; background: #fff; color: #345844; font: 600 13px sans-serif; }
+            .filtros-mapa button[aria-pressed="true"] { background: #007d54; color: #fff; }
+            ${Platform.OS === 'web' ? `
+            @media (min-width: 768px) {
+              .filtros-mapa { justify-content: flex-start; gap: 8px; padding-left: 14px; padding-right: 14px; }
+              .filtros-mapa button { flex: 0 0 auto; min-width: 120px; padding: 0 22px; cursor: pointer; }
+            }
+            ` : ''}
+            .pin-mascota { background: transparent; border: 0; }
+            .pin-mascota svg { display: block; width: 44px; height: 48px; filter: drop-shadow(0 2px 2px #0004); }
+            .pin-mascota:focus-visible, .grupo-mapa:focus-visible { outline: 3px solid #111; outline-offset: 4px; }
+            .grupo-mapa { display: flex; align-items: center; justify-content: center; border: 3px solid #fff; border-radius: 50%; background: #7047b8; color: #fff; font: 700 16px sans-serif; box-shadow: 0 0 0 5px #7047b833; box-sizing: border-box; }
+            .leaflet-container a.leaflet-popup-close-button { width: 44px; height: 44px; line-height: 44px; font-size: 26px; color: #163f30; }
+            .leaflet-popup-content { padding-top: 18px; }
+            .leaflet-popup-content-wrapper { max-height: calc(100vh - 100px); overflow-y: auto; }
+            .mapa-vacio { position: absolute; bottom: 52px; left: 12px; right: 12px; z-index: 800; background: #fff; border-radius: 12px; padding: 10px; font: 13px sans-serif; text-align: center; pointer-events: none; }
+            .leaflet-popup-content-wrapper { border-radius: 18px; box-shadow: 0 6px 24px #123b3029; }
+            .leaflet-popup-content { margin: 18px; width: 260px !important; max-width: calc(100vw - 90px); font: 14px/1.45 sans-serif; color: #476354; }
+            .mapa-foto { width: 72px; height: 82px; border-radius: 12px; background: #eef5f0; object-fit: contain; flex-shrink: 0; }
+            .mapa-resumen { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
+            .mapa-resumen strong { display: block; color: #163f30; font-size: 18px; overflow-wrap: anywhere; }
+            .mapa-estado { display: inline-block; padding: 3px 8px; border-radius: 20px; font: 700 11px/1.5 sans-serif; margin-bottom: 5px; }
+            .mapa-zona { margin: 8px 0; overflow-wrap: anywhere; }
+            .mapa-fecha { font-size: 12px; color: #637a6d; }
+            .leyenda-mapa { background: #fff; padding: 10px 12px; border: 1px solid #d9e7de; border-radius: 14px; font: 13px/21px sans-serif; color: #345844; box-shadow: 0 2px 10px #163f301a; }
+            .acciones-mapa { display: flex; flex-direction: column; gap: 8px; }
+            .acciones-mapa button { min-height: 44px; padding: 10px 14px; border: 1px solid #d5e4da; border-radius: 12px; background: #fff; color: #007d54; font: 700 13px sans-serif; cursor: pointer; box-shadow: 0 2px 10px #163f301a; }
+            .acciones-mapa button:focus-visible { outline: 3px solid #111; outline-offset: 2px; }
+            .acciones-mapa button:disabled { opacity: .6; cursor: default; }
+            .acciones-mapa button:hover:not(:disabled) { background: #eaf6ef; }
+            .leyenda-mapa { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 6px 8px; font-size: 11px; line-height: 16px; }
+            .leyenda-mapa strong { display: block; color: #163f30; margin-bottom: 4px; }
+            .ver-reporte { display: block; width: 100%; margin-top: 12px; min-height: 44px; padding: 10px 16px; border: 0; border-radius: 12px; background: #007d54; color: #fff; font: 600 14px sans-serif; cursor: pointer; }
+            .ver-reporte:hover { background: #006443; }
             .ver-reporte:focus-visible { outline: 3px solid #111; outline-offset: 3px; }
-            .leyenda-mapa span { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 50%; }
+            .leyenda-mapa span { display: inline-block; width: 10px; height: 10px; margin-right: 7px; border-radius: 50%; }
+            .leaflet-control-zoom { border: 1px solid #d5e4da !important; border-radius: 12px !important; overflow: hidden; box-shadow: 0 2px 10px #163f301a !important; }
+            .leaflet-control-zoom a { width: 40px; height: 40px; line-height: 40px; color: #007d54; }
+            @media (max-width: 480px) { .leyenda-mapa { font-size: 11px; line-height: 17px; padding: 7px 9px; } .mapa-foto { width: 58px; height: 66px; } }
           </style>
         </head>
         <body>
-          <div id="mapa"></div>
+          <div id="resumen-mapa" class="resumen-mapa" role="status" aria-live="polite"></div>
+          <div class="filtros-mapa" role="group" aria-label="Filtrar reportes">
+            <button type="button" data-tipo="Todos" aria-pressed="true">Todos</button>
+            <button type="button" data-tipo="Perdida" aria-pressed="false">Perdidas</button>
+            <button type="button" data-tipo="Encontrada" aria-pressed="false">Encontradas</button>
+          </div><div id="mapa"></div><div id="vacio" class="mapa-vacio" hidden>No hay reportes de este tipo en esta vista.</div>
           <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
           <script>
             const mapa = L.map('mapa').setView([${centro.lat}, ${centro.lng}], 13);
@@ -791,28 +852,57 @@ const generarMapaReportesHtml = (
             const yo = ${JSON.stringify(miUbicacion)};
             // La ubicación se mantiene debajo de los reportes y no intercepta sus pulsaciones.
             mapa.createPane('ubicacion');
-            mapa.getPane('ubicacion').style.zIndex = '350';
+            mapa.getPane('ubicacion').style.zIndex = '450';
             mapa.getPane('ubicacion').style.pointerEvents = 'none';
             if (yo) {
               L.circleMarker([yo.lat, yo.lng], {
                 pane: 'ubicacion', radius: 18,
                 fillColor: '#1e88e5', color: '#1e88e5',
-                weight: 3, fillOpacity: 0.15, interactive: false
+                weight: 0, fillOpacity: 0.18, interactive: false
               }).addTo(mapa);
               L.circleMarker([yo.lat, yo.lng], {
-                pane: 'ubicacion', radius: 6,
+                pane: 'ubicacion', radius: 7,
                 fillColor: '#1e88e5', color: '#fff',
                 weight: 2, fillOpacity: 1, interactive: false
               }).addTo(mapa);
             }
-            puntos.forEach(function (p) {
+            function crearFicha(p) {
               const contenido = document.createElement('div');
+              const resumen = document.createElement('div');
+              resumen.className = 'mapa-resumen';
+              if (p.foto && ['https://', 'http://', 'data:image/'].some(function (inicio) { return p.foto.toLowerCase().startsWith(inicio); })) {
+                const foto = document.createElement('img');
+                foto.src = p.foto;
+                foto.alt = 'Foto de ' + p.titulo;
+                foto.className = 'mapa-foto';
+                foto.addEventListener('error', function () { foto.style.display = 'none'; });
+                resumen.appendChild(foto);
+              }
+              const datos = document.createElement('div');
+              const estado = document.createElement('span');
+              estado.className = 'mapa-estado';
+              estado.textContent = p.tipo === 'Perdida' ? 'SE BUSCA' : 'ENCONTRADA';
+              estado.style.backgroundColor = p.tipo === 'Perdida' ? '#fff0ec' : '#e4f5ec';
+              estado.style.color = p.tipo === 'Perdida' ? '#b42318' : '#007d54';
               const titulo = document.createElement('strong');
               titulo.textContent = p.titulo;
               const detalle = document.createElement('div');
               detalle.textContent = p.detalle;
-              contenido.appendChild(titulo);
-              contenido.appendChild(detalle);
+              datos.appendChild(estado);
+              datos.appendChild(titulo);
+              datos.appendChild(detalle);
+              resumen.appendChild(datos);
+              contenido.appendChild(resumen);
+              const zona = document.createElement('div');
+              zona.className = 'mapa-zona';
+              zona.textContent = p.zona;
+              contenido.appendChild(zona);
+              if (p.fecha) {
+                const fecha = document.createElement('div');
+                fecha.className = 'mapa-fecha';
+                fecha.textContent = (p.tipo === 'Perdida' ? 'Se perdió ' : 'Se encontró ') + p.fecha;
+                contenido.appendChild(fecha);
+              }
               const boton = document.createElement('button');
               boton.type = 'button';
               boton.className = 'ver-reporte';
@@ -824,19 +914,125 @@ const generarMapaReportesHtml = (
                 else window.parent.postMessage(mensaje, '*');
               });
               contenido.appendChild(boton);
-              L.circleMarker([p.lat, p.lng], {
-                radius: 10, fillColor: p.color, color: '#fff',
-                weight: 2, fillOpacity: 1
-              }).addTo(mapa).bindPopup(contenido);
+              return contenido;
+            }
+            let visibles = puntos.slice();
+            function actualizarResumen(tipo) {
+              const cantidad = visibles.length;
+              const etiqueta = tipo === 'Todos' ? (cantidad === 1 ? 'reporte' : 'reportes') : tipo === 'Perdida' ? (cantidad === 1 ? 'perdida' : 'perdidas') : (cantidad === 1 ? 'encontrada' : 'encontradas');
+              document.getElementById('resumen-mapa').textContent = cantidad + ' ' + etiqueta + ' · ' + puntos.length + ' en total';
+              const boton = document.getElementById('ver-resultados');
+              if (boton) { boton.disabled = cantidad === 0; boton.title = cantidad ? 'Encuadrar los resultados del filtro' : 'No hay resultados para este filtro'; }
+            }
+            const capaReportes = L.layerGroup().addTo(mapa);
+            const opcionesFicha = { maxWidth: 280, autoPan: true, autoPanPaddingTopLeft: [12, 100], autoPanPaddingBottomRight: [12, 46] };
+            function dibujarReportes() {
+              capaReportes.clearLayers();
+              const grupos = [];
+              visibles.forEach(function (p) {
+                const pixel = mapa.project([p.lat, p.lng], mapa.getZoom());
+                let grupo = grupos.find(function (g) { return g.pixel.distanceTo(pixel) < 44; });
+                if (!grupo) { grupo = { pixel: pixel, puntos: [] }; grupos.push(grupo); }
+                grupo.puntos.push(p);
+              });
+              grupos.forEach(function (g) {
+                if (g.puntos.length === 1) {
+                  const p = g.puntos[0];
+                  const colorPin = p.tipo === 'Perdida' ? '#e53935' : '#00875c';
+                  const pin = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 48" aria-hidden="true">' +
+                    '<path d="M22 46C18 40 5 29 5 19a17 17 0 1 1 34 0c0 10-13 21-17 27Z" fill="' + colorPin + '" stroke="white" stroke-width="2.5"/>' +
+                    '<g fill="white"><ellipse cx="14" cy="17" rx="2.6" ry="3.3" transform="rotate(-25 14 17)"/>' +
+                    '<ellipse cx="19" cy="12" rx="2.6" ry="3.3"/><ellipse cx="25" cy="12" rx="2.6" ry="3.3"/>' +
+                    '<ellipse cx="30" cy="17" rx="2.6" ry="3.3" transform="rotate(25 30 17)"/>' +
+                    '<path d="M16 25c0-3 3-6 6-6s6 3 6 6c0 5-4 3-6 3s-6 2-6-3Z"/></g></svg>';
+                  L.marker([p.lat, p.lng], { title: p.titulo + ' · ' + p.tipo, alt: p.titulo + ' · ' + p.tipo,
+                    icon: L.divIcon({ className: 'pin-mascota', html: pin, iconSize: [44, 48], iconAnchor: [22, 46], popupAnchor: [0, -42] }) })
+                    .addTo(capaReportes).bindPopup(crearFicha(p), opcionesFicha);
+                  return;
+                }
+                const centroGrupo = L.latLngBounds(g.puntos.map(function(p) { return [p.lat, p.lng]; })).getCenter();
+                const marcador = L.marker(centroGrupo, { title: g.puntos.length + ' reportes cercanos',
+                  icon: L.divIcon({ className: 'grupo-mapa', html: String(g.puntos.length), iconSize: [42, 42], iconAnchor: [21, 21] }) }).addTo(capaReportes);
+                marcador.on('click', function () {
+                  if (mapa.getZoom() < 18) {
+                    mapa.setView(centroGrupo, Math.min(18, mapa.getZoom() + 2));
+                  } else {
+                    const lista = document.createElement('div');
+                    const titulo = document.createElement('strong'); titulo.textContent = 'Reportes en este lugar'; lista.appendChild(titulo);
+                    g.puntos.forEach(function(p) {
+                      const boton = document.createElement('button'); boton.className = 'ver-reporte'; boton.type = 'button';
+                      boton.textContent = p.titulo + ' · ' + p.tipo;
+                      boton.onclick = function() { L.popup(opcionesFicha).setLatLng([p.lat, p.lng]).setContent(crearFicha(p)).openOn(mapa); };
+                      lista.appendChild(boton);
+                    });
+                    L.popup(opcionesFicha).setLatLng(centroGrupo).setContent(lista).openOn(mapa);
+                  }
+                });
+              });
+            }
+            mapa.on('zoomend', dibujarReportes);
+            document.querySelectorAll('.filtros-mapa button').forEach(function(boton) {
+              boton.addEventListener('click', function() {
+                const tipo = boton.getAttribute('data-tipo');
+                visibles = puntos.filter(function(p) { return tipo === 'Todos' || p.tipo === tipo; });
+                document.querySelectorAll('.filtros-mapa button').forEach(function(b) { b.setAttribute('aria-pressed', String(b === boton)); });
+                mapa.closePopup(); dibujarReportes(); actualizarResumen(tipo);
+                document.getElementById('vacio').hidden = visibles.length > 0;
+              });
             });
+            dibujarReportes();
+            actualizarResumen('Todos');
+            document.getElementById('vacio').hidden = visibles.length > 0;
             // Encuadrar todos los reportes, aunque alguno esté lejos del centro inicial.
             const limites = puntos.map(function (p) { return [p.lat, p.lng]; });
             if (yo) limites.push([yo.lat, yo.lng]);
             if (limites.length) mapa.fitBounds(limites, { padding: [32, 32], maxZoom: 16 });
 
+            if (${centrarEnMiUbicacion} && yo) mapa.setView([yo.lat, yo.lng], 16);
+            const acciones = L.control({ position: 'topright' });
+            acciones.onAdd = function () {
+              const caja = L.DomUtil.create('div', 'acciones-mapa');
+              const ubicacion = document.createElement('button');
+              ubicacion.type = 'button';
+              ubicacion.textContent = ${buscandoUbicacion} ? 'Buscando…' : '◎ Mi ubicación';
+              ubicacion.disabled = ${buscandoUbicacion};
+              ubicacion.setAttribute('aria-label', 'Regresar a mi ubicación');
+              ubicacion.addEventListener('click', function () {
+                mapa.closePopup();
+                if (yo) { mapa.setView([yo.lat, yo.lng], 16); return; }
+                const mensaje = JSON.stringify({ tipo: 'solicitar-ubicacion-mapa' });
+                if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(mensaje);
+                else window.parent.postMessage(mensaje, '*');
+              });
+              const todos = document.createElement('button');
+              todos.type = 'button';
+              todos.id = 'ver-resultados';
+              todos.textContent = '⌗ Ver resultados';
+              todos.setAttribute('aria-label', 'Encuadrar los resultados del filtro');
+              todos.disabled = puntos.length === 0;
+              todos.title = puntos.length ? 'Mostrar todos los reportes de esta vista' : 'No hay reportes en esta vista';
+              todos.addEventListener('click', function () {
+                mapa.closePopup();
+                if (visibles.length) mapa.fitBounds(visibles.map(function (p) { return [p.lat, p.lng]; }), { paddingTopLeft: [50, 110], paddingBottomRight: [50, 50], maxZoom: 16 });
+              });
+              caja.appendChild(ubicacion);
+              caja.appendChild(todos);
+              L.DomEvent.disableClickPropagation(caja);
+              L.DomEvent.disableScrollPropagation(caja);
+              return caja;
+            };
+            acciones.addTo(mapa);
+
             const leyenda = L.control({ position: 'bottomleft' });
             leyenda.onAdd = function () {
               const caja = L.DomUtil.create('div', 'leyenda-mapa');
+              const grupos = document.createElement('div');
+              grupos.style.cssText = 'flex-basis:100%;display:flex;align-items:center;gap:6px';
+              const numero = document.createElement('b'); numero.textContent = '2+';
+              numero.style.cssText = 'background:#7047b8;color:white;border-radius:50%;min-width:22px;height:22px;line-height:22px;text-align:center;font-size:10px';
+              grupos.appendChild(numero);
+              grupos.appendChild(document.createTextNode('Reportes agrupados · toca para ver'));
+
               [['#e53935', 'Perdida'], ['${PRIMARY_COLOR}', 'Encontrada'], ['#1e88e5', 'Tu ubicación']].forEach(function (dato) {
                 const fila = document.createElement('div');
                 const color = document.createElement('span');
@@ -845,6 +1041,7 @@ const generarMapaReportesHtml = (
                 fila.appendChild(document.createTextNode(dato[1]));
                 caja.appendChild(fila);
               });
+              caja.appendChild(grupos);
               L.DomEvent.disableClickPropagation(caja);
               return caja;
             };
@@ -1303,6 +1500,10 @@ const cambiarGuardado = async (reporteId: string) => {
   const [origenEscanerVisible, setOrigenEscanerVisible] = useState(false);
   const [eligiendoEscaner, setEligiendoEscaner] = useState(false);
   const escanerOcupadoRef = useRef(false);
+  const fotoEscanerRef = useRef<{ uid: string; imagen: string } | null>(null);
+  const peticionEscanerRef = useRef<AbortController | null>(null);
+  const [errorEscaner, setErrorEscaner] = useState<{ mensaje: string; reintentar: boolean } | null>(null);
+  const [mensajeEscaner, setMensajeEscaner] = useState('Analizando foto…');
   const [coincidencias, setCoincidencias] = useState<Coincidencia[]>([]);
   const [resultadosVisible, setResultadosVisible] = useState<boolean>(false);
   const [comparados, setComparados] = useState<number | null>(null);
@@ -1733,6 +1934,11 @@ const cambiarGuardado = async (reporteId: string) => {
   };
 
   const handleLogout = async () => {
+    peticionEscanerRef.current?.abort();
+    fotoEscanerRef.current = null;
+    setErrorEscaner(null);
+    setResultadosVisible(false);
+    setOrigenEscanerVisible(false);
     try {
       await signOut(auth);
     } catch {}
@@ -1866,9 +2072,9 @@ const cambiarGuardado = async (reporteId: string) => {
 
   // En pantallas anchas (computadora) el contenido se centra en una columna
   const { width: anchoPantalla } = useWindowDimensions();
-  const margenLateral = anchoPantalla > 1100 ? 32 : 0;
+  const margenLateral = Math.max(0, (anchoPantalla - 1440) / 2);
   const esEscritorio = Platform.OS === 'web' && anchoPantalla >= 900;
-  const columnas = anchoPantalla >= 1500 ? 4 : anchoPantalla >= 1100 ? 3 : anchoPantalla >= 700 ? 2 : 1;
+  const columnas = anchoPantalla >= 1200 ? 3 : anchoPantalla >= 700 ? 2 : 1;
   const zonaAutoRef = useRef<string>('');
 
   // El HTML del selector solo cambia al abrir el formulario, editar o usar la ubicación actual.
@@ -2109,80 +2315,124 @@ const cambiarGuardado = async (reporteId: string) => {
     if (!escanerOcupadoRef.current) setOrigenEscanerVisible(true);
   };
 
-  // Ambos orígenes comparten el mismo análisis y manejo de resultados.
-  const escanearFoto = async (origen: 'camara' | 'galeria') => {
+  // Conserva la foto solo en memoria para reintentar, sin duplicar solicitudes.
+  const escanearFoto = async (origen: 'camara' | 'galeria' | 'reintentar') => {
     if (escanerOcupadoRef.current) return;
-    if (ESCANEO_URL.startsWith('PENDIENTE')) {
-      avisar(
-        'Falta configurar',
-        'Aún no has puesto la URL de tu Cloud Function en la constante ESCANEO_URL.'
-      );
+    const usuarioEscaner = auth.currentUser;
+    if (!usuarioEscaner) {
+      avisar('Inicia sesión', 'Necesitas iniciar sesión para usar el escáner.');
       return;
     }
-
+    const mismaSesion = () => auth.currentUser?.uid === usuarioEscaner.uid;
     escanerOcupadoRef.current = true;
+    setErrorEscaner(null);
     setEligiendoEscaner(true);
+    let reloj: ReturnType<typeof setTimeout> | undefined;
+    let avisoLento: ReturnType<typeof setTimeout> | undefined;
+    let relojToken: ReturnType<typeof setTimeout> | undefined;
+    const controller = new AbortController();
+    peticionEscanerRef.current = controller;
     try {
-      if (origen === 'camara' && Platform.OS !== 'web') {
-        const permiso = await ImagePicker.requestCameraPermissionsAsync();
-        if (!permiso.granted) {
-          avisar('Permiso necesario', 'Activa el acceso a la cámara o elige una foto de la galería.');
-          return;
+      let imagen: string;
+      if (origen === 'reintentar') {
+        const guardada = fotoEscanerRef.current;
+        if (!guardada || guardada.uid !== usuarioEscaner.uid) throw new Error('Selecciona una foto para analizar.');
+        imagen = guardada.imagen;
+      } else {
+        fotoEscanerRef.current = null;
+        if (origen === 'camara' && Platform.OS !== 'web') {
+          const permiso = await ImagePicker.requestCameraPermissionsAsync();
+          if (!permiso.granted) {
+            avisar('Permiso necesario', 'Activa el acceso a la cámara o elige una foto de la galería.');
+            return;
+          }
         }
+        const opciones: ImagePicker.ImagePickerOptions = {
+          mediaTypes: ['images'], quality: 1, base64: false, allowsMultipleSelection: false,
+        };
+        const resultado = origen === 'camara'
+          ? await ImagePicker.launchCameraAsync(opciones)
+          : await ImagePicker.launchImageLibraryAsync(opciones);
+        if (resultado.canceled || !mismaSesion() || controller.signal.aborted) return;
+        const foto = resultado.assets?.[0];
+        if (!foto?.uri) throw new Error('No se pudo leer la foto. Selecciona otra imagen.');
+        setOrigenEscanerVisible(false);
+        setMensajeEscaner('Preparando foto…');
+        setEscaneando(true);
+        const acciones: ImageManipulator.Action[] = [];
+        if (Math.max(foto.width, foto.height) > 1280) {
+          acciones.push({ resize: foto.width >= foto.height ? { width: 1280 } : { height: 1280 } });
+        }
+        const preparada = await ImageManipulator.manipulateAsync(foto.uri, acciones, {
+          compress: 0.85, format: ImageManipulator.SaveFormat.JPEG, base64: true,
+        });
+        if (!mismaSesion() || controller.signal.aborted) return;
+        if (!preparada.base64 || preparada.base64.length > 3000000) {
+          throw new Error('La foto es demasiado grande o no pudo prepararse. Prueba con otra imagen.');
+        }
+        imagen = preparada.base64;
+        fotoEscanerRef.current = { uid: usuarioEscaner.uid, imagen };
       }
-      const opciones: ImagePicker.ImagePickerOptions = {
-        mediaTypes: ['images'],
-        quality: 0.3,
-        base64: true,
-        allowsMultipleSelection: false,
-      };
-      const resultado = origen === 'camara'
-        ? await ImagePicker.launchCameraAsync(opciones)
-        : await ImagePicker.launchImageLibraryAsync(opciones);
-      if (resultado.canceled) return;
-      const imagen = resultado.assets?.[0]?.base64;
-      if (!imagen) {
-        avisar('No se pudo leer la foto', 'Intenta con otra imagen.');
-        return;
-      }
+      if (!mismaSesion() || controller.signal.aborted) return;
       setOrigenEscanerVisible(false);
       setEligiendoEscaner(false);
+      setResultadosVisible(false);
       setEstadoImagenEscaner(null);
       setCoincidencias([]);
       setComparados(null);
+      setMensajeEscaner('Analizando foto…');
       setEscaneando(true);
-      // El token demuestra al servidor que hay una sesión iniciada
-      const token = await auth.currentUser?.getIdToken();
+      const token = await Promise.race([
+        usuarioEscaner.getIdToken(),
+        new Promise<never>((_, reject) => {
+          relojToken = setTimeout(() => reject(new Error('No se pudo comprobar tu sesión a tiempo. Revisa tu conexión.')), 15000);
+        }),
+      ]);
+      clearTimeout(relojToken);
+      if (!mismaSesion() || controller.signal.aborted) return;
+      // El servidor tiene 54 s; dejamos margen para la conexión del teléfono.
+      reloj = setTimeout(() => controller.abort(), 70000);
+      avisoLento = setTimeout(() => setMensajeEscaner('El análisis está tardando. Seguimos esperando la respuesta…'), 15000);
       const resp = await fetch(ESCANEO_URL, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
+        method: 'POST', signal: controller.signal,
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ imagen }),
       });
+      const data = await resp.json().catch(() => null);
+      if (!mismaSesion()) return;
       if (!resp.ok) {
-        let detalle = '';
-        try {
-          detalle = (await resp.json()).error ?? '';
-        } catch {}
-        throw new Error(`${detalle || 'Error del servidor'} (código ${resp.status})`);
+        const referencia = typeof data?.solicitudId === 'string' ? `\nReferencia: ${data.solicitudId}` : '';
+        throw Object.assign(new Error(`${data?.error || 'El servidor no pudo completar el análisis.'} (código ${resp.status})${referencia}`), {
+          reintentar: typeof data?.reintentar === 'boolean' ? data.reintentar : resp.status >= 500,
+        });
       }
-      const data = await resp.json();
-      const estado = data.estadoImagen;
-      const estadoValido = estado === 'mascota' || estado === 'sin_mascota' || estado === 'no_clara' ? estado : null;
-      setEstadoImagenEscaner(estadoValido);
-      setCoincidencias(estadoValido === 'sin_mascota' || estadoValido === 'no_clara' ? [] : (data.coincidencias ?? []));
-      setComparados(typeof data.comparados === 'number' ? data.comparados : null);
+      if (!data || !['mascota', 'sin_mascota', 'no_clara'].includes(data.estadoImagen) ||
+          !Array.isArray(data.coincidencias) || typeof data.comparados !== 'number' ||
+          data.coincidencias.some((c: Coincidencia) => !c || typeof c.id !== 'string' || typeof c.similitud !== 'number')) {
+        throw new Error('El servidor devolvió una respuesta incompleta. Puedes reintentar con la misma foto.');
+      }
+      setEstadoImagenEscaner(data.estadoImagen);
+      setCoincidencias(data.estadoImagen === 'mascota' ? data.coincidencias : []);
+      setComparados(data.comparados);
       setResultadosVisible(true);
+      fotoEscanerRef.current = null;
     } catch (e) {
-      avisar(
-        'Error',
-        e instanceof TypeError
-          ? 'No se pudo conectar con el servidor del escáner. Revisa tu conexión.'
-          : (e as Error).message || 'No se pudo analizar la foto. Intenta de nuevo.'
-      );
+      if (mismaSesion()) {
+        const error = e as Error & { reintentar?: boolean };
+        setOrigenEscanerVisible(false);
+        setErrorEscaner({
+          mensaje: controller.signal.aborted
+            ? 'La conexión tardó demasiado. Revisa tu internet y vuelve a intentar. Esto no significa que no haya coincidencias.'
+            : e instanceof TypeError ? 'No se pudo conectar con el escáner. Revisa tu conexión e intenta de nuevo.'
+            : error.message || 'No se pudo analizar la foto. Intenta de nuevo.',
+          reintentar: error.reintentar !== false && fotoEscanerRef.current?.uid === usuarioEscaner.uid,
+        });
+      }
     } finally {
+      clearTimeout(reloj);
+      clearTimeout(avisoLento);
+      clearTimeout(relojToken);
+      peticionEscanerRef.current = null;
       setEscaneando(false);
       setEligiendoEscaner(false);
       escanerOcupadoRef.current = false;
@@ -2476,9 +2726,28 @@ const cambiarGuardado = async (reporteId: string) => {
         )
       : reportesFiltrados;
 
+  const [centrarUbicacionMapa, setCentrarUbicacionMapa] = useState(false);
+  const [buscandoUbicacionMapa, setBuscandoUbicacionMapa] = useState(false);
+  const solicitudUbicacionMapaRef = useRef(false);
+  const localizarDesdeMapa = async () => {
+    if (solicitudUbicacionMapaRef.current) return;
+    solicitudUbicacionMapaRef.current = true;
+    setBuscandoUbicacionMapa(true);
+    try {
+      const posicion = await obtenerUbicacion();
+      if (posicion) {
+        setCentrarUbicacionMapa(true);
+        setMiUbicacion(posicion);
+      }
+    } finally {
+      solicitudUbicacionMapaRef.current = false;
+      setBuscandoUbicacionMapa(false);
+    }
+  };
+
   const mapaHtml = useMemo(
-    () => generarMapaReportesHtml(reportesFiltrados, miUbicacion),
-    [reportesFiltrados, miUbicacion]
+    () => generarMapaReportesHtml(reportesFiltrados, miUbicacion, centrarUbicacionMapa, buscandoUbicacionMapa),
+    [reportesFiltrados, miUbicacion, centrarUbicacionMapa, buscandoUbicacionMapa]
   );
 
   const abrirReporteDesdeMapa = (data: string) => {
@@ -2488,6 +2757,7 @@ const cambiarGuardado = async (reporteId: string) => {
     } catch {
       return;
     }
+    if (mensaje?.tipo === 'solicitar-ubicacion-mapa') { void localizarDesdeMapa(); return; }
     if (mensaje?.tipo !== 'abrir-reporte' || typeof mensaje.id !== 'string') return;
     const reporte = reportesFiltrados.find((r) => r.id === mensaje.id);
     if (!reporte) {
@@ -2573,24 +2843,29 @@ const cambiarGuardado = async (reporteId: string) => {
   // ==========================================================
   if (!sesionIniciada) {
     return (
-      <SafeAreaView style={styles.contenedorLogin}>
-        <StatusBar backgroundColor={PRIMARY_DARK} barStyle="light-content" />
-        <ScrollView style={{ width: '100%' }} contentContainerStyle={styles.loginContenido} keyboardShouldPersistTaps="handled">
-        <View style={styles.tarjetaLogin}>
-          <Image
-            source={require('./assets/logo-sin-eslogan.png')}
-            style={{ width: 150, height: 200, alignSelf: 'center' }}
-            resizeMode="contain"
-          />
+      <SafeAreaProvider>
+      <SafeAreaPantalla style={styles.contenedorLogin} edges={['top', 'bottom', 'left', 'right']}>
+        <StatusBar backgroundColor="#eef7f2" barStyle="dark-content" />
+        <KeyboardAvoidingView style={{ flex: 1, width: '100%' }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} enabled={Platform.OS !== 'web'}>
+        <ScrollView style={{ flex: 1, width: '100%' }} contentContainerStyle={styles.loginContenido} keyboardDismissMode="none" keyboardShouldPersistTaps="handled">
+        <View style={[styles.tarjetaLogin, { padding: anchoPantalla < 400 ? 20 : 28 }]}>
+          <View style={styles.loginMarca}>
+            <Image source={require('./assets/logo-icon.png')} style={{ width: 42, height: 50 }} resizeMode="contain" />
+            <Text style={styles.logoLogin}>PetFind</Text>
+          </View>
+          <Text accessibilityRole="header" style={styles.loginTitulo}>
+            {modoRegistro ? 'Crea tu cuenta' : 'Inicia sesión'}
+          </Text>
           <Text style={styles.subtituloLogin}>
-            Red comunitaria para el reporte y localización de mascotas
+            {modoRegistro ? 'Únete para ayudar a más mascotas.' : 'Ayudemos a que vuelvan a casa.'}
           </Text>
 
           <View style={styles.formContainer}>
-            <Text style={styles.labelInput}>Correo Electrónico</Text>
+            <Text style={styles.labelInput}>Correo electrónico</Text>
             <TextInput
               style={styles.inputLogin}
               placeholder="correo@ejemplo.com"
+              placeholderTextColor="#61766a"
               value={email}
               onChangeText={setEmail}
               keyboardType="email-address"
@@ -2602,7 +2877,8 @@ const cambiarGuardado = async (reporteId: string) => {
             <View style={styles.passwordFila}>
               <TextInput
                 style={styles.passwordCampo}
-                placeholder="Escribe tu contraseña"
+                placeholder="Tu contraseña"
+                placeholderTextColor="#61766a"
                 value={password}
                 onChangeText={setPassword}
                 secureTextEntry={!mostrarPassword}
@@ -2621,26 +2897,6 @@ const cambiarGuardado = async (reporteId: string) => {
                 <Text style={styles.passwordBotonTexto}>{mostrarPassword ? 'Ocultar' : 'Mostrar'}</Text>
               </TouchableOpacity>
             </View>
-            {!modoRegistro && (
-              <View style={{ marginBottom: 12 }}>
-                <TouchableOpacity
-                  onPress={recuperarPassword}
-                  disabled={recuperandoPassword || cargandoAuth}
-                  accessibilityRole="button"
-                  accessibilityLabel="Solicitar enlace para restablecer contraseña"
-                  accessibilityHint="Usa el correo escrito en el campo de correo electrónico"
-                  accessibilityState={{ disabled: recuperandoPassword || cargandoAuth, busy: recuperandoPassword }}
-                  style={{ minHeight: 44, justifyContent: 'center', alignItems: 'center', opacity: recuperandoPassword || cargandoAuth ? 0.6 : 1 }}
-                >
-                  <Text style={{ color: PRIMARY_DARK, fontSize: 14, fontWeight: '600', textDecorationLine: 'underline' }}>
-                    {recuperandoPassword ? 'Solicitando enlace…' : '¿Olvidaste tu contraseña?'}
-                  </Text>
-                </TouchableOpacity>
-                <Text style={{ color: '#555', fontSize: 12, lineHeight: 18, textAlign: 'center' }}>
-                  Usaremos el correo escrito arriba.
-                </Text>
-              </View>
-            )}
             {modoRegistro && (
               <View style={styles.passwordAyuda}>
                 <Text style={styles.passwordAyudaTitulo}>Requisitos de contraseña</Text>
@@ -2658,7 +2914,7 @@ const cambiarGuardado = async (reporteId: string) => {
                 onPress={() => setAceptaPrivacidad(!aceptaPrivacidad)}
                 accessibilityRole="checkbox"
                 accessibilityState={{ checked: aceptaPrivacidad }}
-                style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4, marginBottom: 4 }}
+                style={{ flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 44, marginTop: 4, marginBottom: 4 }}
               >
                 <Ico n={aceptaPrivacidad ? 'checkbox' : 'square-outline'} s={24} c={PRIMARY_DARK} />
                 <Text style={{ flex: 1, fontSize: 13, color: '#444', lineHeight: 18 }}>
@@ -2673,16 +2929,37 @@ const cambiarGuardado = async (reporteId: string) => {
               </TouchableOpacity>
             )}
             <TouchableOpacity accessibilityRole="button"
-              style={styles.botonIngresar}
+              style={[styles.botonIngresar, { opacity: cargandoAuth || recuperandoPassword ? 0.6 : 1 }]}
+              accessibilityState={{ disabled: cargandoAuth || recuperandoPassword, busy: cargandoAuth }}
               onPress={handleLogin}
               disabled={cargandoAuth || recuperandoPassword}
             >
               <Text style={styles.textoBotonIngresar}>
-                {cargandoAuth ? 'Cargando...' : modoRegistro ? 'Crear cuenta' : 'Iniciar Sesión'}
+                {cargandoAuth ? 'Cargando...' : modoRegistro ? 'Crear cuenta' : 'Iniciar sesión'}
               </Text>
             </TouchableOpacity>
+            {!modoRegistro && (
+              <View style={{ marginTop: 6, marginBottom: 6 }}>
+                <TouchableOpacity
+                  onPress={recuperarPassword}
+                  disabled={recuperandoPassword || cargandoAuth}
+                  accessibilityRole="button"
+                  accessibilityLabel="Solicitar enlace para restablecer contraseña"
+                  accessibilityHint="Usa el correo escrito en el campo de correo electrónico"
+                  accessibilityState={{ disabled: recuperandoPassword || cargandoAuth, busy: recuperandoPassword }}
+                  style={{ minHeight: 44, justifyContent: 'center', alignItems: 'center', opacity: recuperandoPassword || cargandoAuth ? 0.6 : 1 }}
+                >
+                  <Text style={{ color: PRIMARY_DARK, fontSize: 14, fontWeight: '600', textDecorationLine: 'underline' }}>
+                    {recuperandoPassword ? 'Solicitando enlace…' : '¿Olvidaste tu contraseña?'}
+                  </Text>
+                </TouchableOpacity>
+                <Text style={{ color: '#597367', fontSize: 12, lineHeight: 18, textAlign: 'center' }}>
+                  Usaremos el correo escrito arriba.
+                </Text>
+              </View>
+            )}
             <TouchableOpacity accessibilityRole="button"
-              style={{ marginTop: 16, alignItems: 'center' }}
+              style={styles.loginEnlace}
               onPress={() => { setMostrarPassword(false); setModoRegistro(!modoRegistro); }}
               disabled={cargandoAuth || recuperandoPassword}
             >
@@ -2690,14 +2967,16 @@ const cambiarGuardado = async (reporteId: string) => {
                 {modoRegistro ? '¿Ya tienes cuenta? Inicia sesión' : '¿No tienes cuenta? Regístrate'}
               </Text>
             </TouchableOpacity>
-            <TouchableOpacity accessibilityRole="button" style={{ marginTop: 12, alignItems: 'center' }} onPress={() => setPrivacidadVisible(true)}>
+            <TouchableOpacity accessibilityRole="button" style={styles.loginPrivacidad} onPress={() => setPrivacidadVisible(true)}>
               <Text style={{ color: '#6b6b6b', fontSize: 13, textDecorationLine: 'underline' }}>Aviso de privacidad</Text>
             </TouchableOpacity>
           </View>
         </View>
         </ScrollView>
+        </KeyboardAvoidingView>
         {modalPrivacidad}
-      </SafeAreaView>
+      </SafeAreaPantalla>
+      </SafeAreaProvider>
     );
   }
 
@@ -2705,11 +2984,12 @@ const cambiarGuardado = async (reporteId: string) => {
   // VISTA 2: Dashboard principal (nuevo diseño)
   // ==========================================================
   return (
-    <SafeAreaView style={styles.contenedorPrincipal}>
-      <StatusBar backgroundColor={PRIMARY_DARK} barStyle="light-content" />
+    <SafeAreaProvider style={{ flex: 1 }}>
+    <SafeAreaPantalla style={styles.contenedorPrincipal} edges={['top', 'bottom', 'left', 'right']}>
+      <StatusBar backgroundColor="#f6f9f7" barStyle="dark-content" />
 
       {/* Barra de navegación superior */}
-      <View style={[styles.navbar, { paddingHorizontal: 16 + margenLateral }]}>
+      <View style={[styles.navbar, { paddingHorizontal: (esEscritorio ? 16 : 12) + margenLateral }]}>
         <View style={styles.navbarLogo}>
           <Image
             source={require('./assets/logo-icon.png')}
@@ -2718,11 +2998,10 @@ const cambiarGuardado = async (reporteId: string) => {
           />
           <View style={{ flexShrink: 1 }}>
             <Text style={styles.navbarTitulo}>PetFind</Text>
-            <Text style={styles.navbarSubtitulo}>LOCALIZADOR DE MASCOTAS</Text>
           </View>
         </View>
 
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: esEscritorio ? 8 : 4 }}>
           {esEscritorio && (
             <>
               <TouchableOpacity accessibilityRole="button"
@@ -2753,47 +3032,21 @@ const cambiarGuardado = async (reporteId: string) => {
               </View>
             )}
           </TouchableOpacity>
-          {esEscritorio && (
-            <TouchableOpacity accessibilityRole="button"
-              style={styles.navbarIconoBoton}
-              onPress={() => {
-                setPasoGuia(0);
-                setGuiaVisible(true);
-              }}
-              accessibilityLabel="Ayuda"
-            >
-              <Ico n="help-circle-outline" s={21} c="#555" />
-            </TouchableOpacity>
-          )}
-          <TouchableOpacity style={styles.navbarIconoBoton} onPress={() => setPerfilVisible(true)} accessibilityRole="button" accessibilityLabel="Abrir mi perfil">
+          <TouchableOpacity accessibilityRole="button" style={styles.navbarIconoBoton}
+            onPress={() => { setPasoGuia(0); setGuiaVisible(true); }} accessibilityLabel="Ayuda: abrir guía de uso">
+            <Ico n="help-circle-outline" s={21} c={PRIMARY_DARK} />
+          </TouchableOpacity>
+          <TouchableOpacity accessibilityRole="button" style={styles.navbarIconoBoton}
+            onPress={() => setPrivacidadVisible(true)} accessibilityLabel="Abrir aviso de privacidad">
+            <Ico n="shield-checkmark-outline" s={21} c={PRIMARY_DARK} />
+          </TouchableOpacity>
+          {esEscritorio && <TouchableOpacity style={styles.navbarIconoBoton} onPress={() => setPerfilVisible(true)} accessibilityRole="button" accessibilityLabel="Abrir mi perfil">
             <Ico n="person-circle-outline" s={26} c={PRIMARY_DARK} />
-          </TouchableOpacity>
+          </TouchableOpacity>}
         </View>
       </View>
 
-      {/* Accesos con texto, disponibles sin entrar en Avisos. */}
-      {!esEscritorio && (
-        <View style={styles.ayudaMovil}>
-          <TouchableOpacity style={styles.ayudaMovilBoton} onPress={() => { setPasoGuia(0); setGuiaVisible(true); }} accessibilityRole="button" accessibilityLabel="Ayuda: abrir guía de uso">
-            <IcoTexto n="help-circle-outline" s={20} c={PRIMARY_DARK} centrado textoStyle={styles.ayudaMovilTexto}>Ayuda</IcoTexto>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.ayudaMovilBoton} onPress={() => setPrivacidadVisible(true)} accessibilityRole="button" accessibilityLabel="Abrir aviso de privacidad">
-            <IcoTexto n="shield-checkmark-outline" s={20} c={PRIMARY_DARK} centrado textoStyle={styles.ayudaMovilTexto}>Privacidad</IcoTexto>
-          </TouchableOpacity>
-        </View>
-      )}
 
-      {/* Barra de estado / estadísticas */}
-      <View style={[styles.statusBar, { paddingHorizontal: 16 + margenLateral }]}>
-        <View style={styles.statusBarIzquierda}>
-          <View style={styles.puntoActivo} />
-          <Text style={styles.statusBarTexto}>Encuentra a tu mascota</Text>
-        </View>
-        <View style={[styles.statusBarDerecha, !esEscritorio && { width: '100%' }]}>
-          <IcoTexto n="heart" s={14} c="#fff" textoStyle={styles.statusBarStat}>{mascotasReunidas} Mascotas Reunidas</IcoTexto>
-          <IcoTexto n="warning" s={14} c="#fff" textoStyle={styles.statusBarStat}>{reportesActivos.length} Reportes Activos</IcoTexto>
-        </View>
-      </View>
 
       {vistaActual === 'mapa' && (
         <View style={{ flex: 1 }}>
@@ -2804,8 +3057,44 @@ const cambiarGuardado = async (reporteId: string) => {
       {vistaActual === 'lista' && (
       <ScrollView
         style={styles.contenido}
-        contentContainerStyle={{ paddingVertical: 14, paddingHorizontal: 14 + margenLateral, paddingBottom: 110 }}
+        contentContainerStyle={{ paddingTop: esEscritorio ? 18 : 12, paddingHorizontal: (esEscritorio ? 28 : 14) + margenLateral, paddingBottom: esEscritorio ? 40 : 24 }}
       >
+        <View style={[styles.inicioBienvenida, { padding: esEscritorio ? 22 : 14, gap: esEscritorio ? 18 : 12, flexDirection: esEscritorio ? 'row' : 'column' }]}>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={styles.inicioAntetitulo}>JUNTOS, DE VUELTA A CASA</Text>
+            <Text accessibilityRole="header" style={[styles.inicioTitulo, { fontSize: esEscritorio ? 28 : 22, lineHeight: esEscritorio ? 34 : 27 }]}>
+              Ayudemos a que vuelvan a casa.
+            </Text>
+            <Text style={styles.inicioDescripcion}>Busca a tu mascota o ayuda a otra familia a encontrarla.</Text>
+            <View style={styles.inicioAcciones}>
+              <TouchableOpacity accessibilityRole="button" onPress={abrirFormulario} style={styles.inicioBotonPrincipal}>
+                <IcoTexto n="add-circle-outline" s={20} c="#fff" centrado textoStyle={styles.inicioBotonTexto}>Reportar mascota</IcoTexto>
+              </TouchableOpacity>
+              <TouchableOpacity accessibilityRole="button" onPress={abrirEscaner} style={styles.inicioBotonSecundario}>
+                <IcoTexto n="camera-outline" s={20} c={PRIMARY_DARK} centrado textoStyle={styles.inicioBotonTextoVerde}>Buscar con una foto</IcoTexto>
+              </TouchableOpacity>
+            </View>
+          </View>
+          <View style={[styles.inicioEstadisticas, { width: esEscritorio ? 220 : '100%', flexDirection: esEscritorio ? 'column' : 'row', alignSelf: 'center' }]}>
+            <View style={styles.inicioEstadistica}>
+              <Ico n="heart-outline" s={23} c={PRIMARY_DARK} />
+              <View style={{ flex: 1 }}><Text style={styles.inicioCifra}>{mascotasReunidas}</Text><Text style={styles.inicioCifraLabel}>Mascotas reunidas</Text></View>
+            </View>
+            <View style={styles.inicioEstadistica}>
+              <Ico n="location-outline" s={23} c={PRIMARY_DARK} />
+              <View style={{ flex: 1 }}><Text style={styles.inicioCifra}>{reportesActivos.length}</Text><Text style={styles.inicioCifraLabel}>Reportes activos</Text></View>
+            </View>
+          </View>
+        </View>
+        <View style={[styles.inicioSeccion, !esEscritorio && { flexDirection: 'column', alignItems: 'stretch', gap: 8 }]}>
+          <View style={{ flexGrow: 1, minWidth: 0 }}>
+            <Text accessibilityRole="header" style={styles.inicioSeccionTitulo}>Ayudemos a encontrarlos</Text>
+            <Text style={styles.inicioSeccionTexto}>Explora los reportes de nuestra comunidad.</Text>
+          </View>
+          <TouchableOpacity accessibilityRole="button" onPress={() => setVistaActual('mapa')} style={[styles.inicioEnlaceMapa, !esEscritorio && { alignSelf: 'flex-start' }]}>
+            <IcoTexto n="map-outline" s={18} c={PRIMARY_DARK} textoStyle={styles.inicioBotonTextoVerde}>Ver mapa</IcoTexto>
+          </TouchableOpacity>
+        </View>
         {/* Panel de filtros */}
         <View style={styles.panelFiltros}>
           <View style={{ justifyContent: 'center' }}>
@@ -2814,7 +3103,11 @@ const cambiarGuardado = async (reporteId: string) => {
             </View>
             <TextInput
               style={[styles.buscador, { marginTop: 0, paddingLeft: 38 }]}
-              placeholder="Buscar por raza, nombre o zona..."
+              placeholder="Buscar mascota o zona"
+              placeholderTextColor="#65776e"
+              accessibilityLabel="Buscar reportes por nombre, raza o zona"
+              autoCorrect={false}
+              returnKeyType="search"
               value={busqueda}
               onChangeText={setBusqueda}
             />
@@ -2942,8 +3235,13 @@ const cambiarGuardado = async (reporteId: string) => {
             {[filtroEstado !== 'Todos' ? filtroEstado : '', filtroEspecie !== 'Todos' ? filtroEspecie : '', filtroColor !== 'Todos' ? `Color: ${filtroColor}` : '', filtroTamano !== 'Todos' ? `Tamaño: ${filtroTamano}` : ''].filter(Boolean).join(' · ')}
           </Text>}
 
+        </View>
           {/* Lista de reportes filtrados */}
-          <View style={{ marginTop: 14 }}>
+          <View style={styles.inicioResultadosCabecera}>
+            <Text accessibilityLiveRegion="polite" style={styles.inicioResultadosTexto}>{cargandoReportes ? 'Buscando reportes…' : `${reportesOrdenados.length} ${reportesOrdenados.length === 1 ? 'reporte disponible' : 'reportes disponibles'}`}</Text>
+            <Text style={styles.inicioOrdenTexto}>{orden === 'recientes' ? 'Más recientes primero' : 'Más cercanos primero'}</Text>
+          </View>
+          <View>
             {cargandoReportes ? (
               <View>
                 <View
@@ -2952,9 +3250,9 @@ const cambiarGuardado = async (reporteId: string) => {
                   <ActivityIndicator size="small" color={PRIMARY_DARK} />
                   <Text style={{ color: '#6b6b6b', fontSize: 13 }}>Cargando reportes...</Text>
                 </View>
-                <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginHorizontal: -5 }}>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginHorizontal: -8 }}>
                   {Array.from({ length: columnas * 2 }).map((_, i) => (
-                    <View key={i} style={{ width: `${100 / columnas}%` as any, padding: 5 }}>
+                    <View key={i} style={{ width: `${100 / columnas}%` as any, padding: 8 }}>
                       <TarjetaEsqueleto vertical />
                     </View>
                   ))}
@@ -2980,7 +3278,7 @@ const cambiarGuardado = async (reporteId: string) => {
                 />
               )
             ) : (
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginHorizontal: -5 }}>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginHorizontal: -8 }}>
               {reportesOrdenados.map((item) => {
                 const esPerdida = item.tipo === 'Perdida';
                 const zona = zonaUtil(item.ubicacion);
@@ -2989,21 +3287,20 @@ const cambiarGuardado = async (reporteId: string) => {
                   <View
                     style={[
                       styles.badge,
-                      { backgroundColor: esPerdida ? '#ffebee' : '#e8f5e9' },
+                      { backgroundColor: esPerdida ? '#fff1ed' : '#e2f6ec', borderWidth: 1, borderColor: esPerdida ? '#f1d1c6' : '#bfdfce', borderRadius: 20, paddingHorizontal: 12, paddingVertical: 7 },
                       vertical && { position: 'absolute', top: 10, left: 10 },
                     ]}
                   >
                     <Text style={{ color: esPerdida ? '#c62828' : '#2e7d32', fontWeight: 'bold', fontSize: 11 }}>
-                      {esPerdida ? 'PERDIDO' : 'ENCONTRADO'}
+                      {esPerdida ? 'SE BUSCA' : 'ENCONTRADA'}
                     </Text>
                   </View>
                 );
                 const datos = (
                   <View style={[styles.tarjetaInfo, styles.reporteDatos]}>
-                    <Text style={styles.reporteNombre}>{item.nombre}</Text>
+                    <Text style={styles.reporteNombre}>{item.nombre || 'Sin nombre'}</Text>
                     <Text style={styles.reporteRaza}>
-                      {item.especie === 'Otro' && item.especieOtro ? `${item.especieOtro} · ` : ''}
-                      {razaVisible(item.raza)}
+                      {`${item.especie === 'Otro' ? (item.especieOtro || 'Otra especie') : item.especie} · ${razaVisible(item.raza)}`}
                     </Text>
                     {zona ? (
                       <IcoTexto n="location-outline" s={16} c="#555f5b" textoStyle={styles.reporteMeta}>
@@ -3037,7 +3334,7 @@ const cambiarGuardado = async (reporteId: string) => {
                 return (
                   <TouchableOpacity
                     key={item.id}
-                    style={{ width: `${100 / columnas}%` as any, padding: 5 }}
+                    style={{ width: `${100 / columnas}%` as any, padding: 8 }}
                     onPress={() => abrirDetalle(item)}
                     accessibilityRole="button"
                     accessibilityLabel={`Ver reporte de ${item.nombre}, mascota ${esPerdida ? 'perdida' : 'encontrada'}, ${razaVisible(item.raza)}${zona ? `, ${zona}` : ''}`}
@@ -3051,6 +3348,10 @@ const cambiarGuardado = async (reporteId: string) => {
                           {etiqueta}
                         </View>
                         {datos}
+                        <View style={styles.inicioPieTarjeta}>
+                          <Text style={styles.inicioBotonTextoVerde}>Ver reporte</Text>
+                          <View style={styles.inicioFlecha}><Ico n="arrow-forward" s={19} c={PRIMARY_DARK} /></View>
+                        </View>
                       </View>
                     ) : (
                       <View style={styles.tarjetaCuadro}>
@@ -3077,7 +3378,6 @@ const cambiarGuardado = async (reporteId: string) => {
               <Text style={styles.leyendaTexto}>Mascota Encontrada</Text>
             </View>
           </View>
-        </View>
       </ScrollView>
       )}
 
@@ -3092,6 +3392,12 @@ const cambiarGuardado = async (reporteId: string) => {
           <Ico n={vistaActual === 'mapa' ? 'map' : 'map-outline'} s={23} c={vistaActual === 'mapa' ? PRIMARY_DARK : '#777'} />
           <Text style={[styles.tabTexto, vistaActual === 'mapa' && styles.tabTextoActivo]}>Mapa</Text>
         </TouchableOpacity>
+        <TouchableOpacity accessibilityRole="button" style={styles.tabItem} accessibilityLabel="Publicar un reporte de mascota" onPress={abrirFormulario}>
+          <View style={styles.tabReportar}>
+            <Ico n="add" s={26} c="#fff" />
+          </View>
+          <Text style={styles.tabTexto}>Reportar</Text>
+        </TouchableOpacity>
         <TouchableOpacity
           style={[styles.tabItem, escaneando && { opacity: 0.6 }]}
           onPress={abrirEscaner}
@@ -3100,14 +3406,12 @@ const cambiarGuardado = async (reporteId: string) => {
           accessibilityLabel={escaneando ? 'Analizando foto' : 'Escanear una mascota'}
           accessibilityState={{ disabled: escaneando, busy: escaneando }}
         >
-          <Ico n="camera-outline" s={23} c={PRIMARY_DARK} />
-          <Text style={[styles.tabTexto, styles.tabTextoActivo]}>{escaneando ? 'Analizando…' : 'Escanear'}</Text>
+          <Ico n="camera-outline" s={23} c="#6b6b6b" />
+          <Text style={styles.tabTexto}>{escaneando ? 'Analizando…' : 'Escanear'}</Text>
         </TouchableOpacity>
-        <TouchableOpacity accessibilityRole="button" style={styles.tabItem} accessibilityLabel="Publicar un reporte de mascota" onPress={abrirFormulario}>
-          <View style={styles.tabReportar}>
-            <Ico n="add" s={26} c="#fff" />
-          </View>
-          <Text style={styles.tabTexto}>Reportar</Text>
+        <TouchableOpacity accessibilityRole="button" style={styles.tabItem} accessibilityLabel="Abrir mi perfil" onPress={() => setPerfilVisible(true)}>
+          <Ico n="person-circle-outline" s={25} c="#777" />
+          <Text style={styles.tabTexto}>Perfil</Text>
         </TouchableOpacity>
       </View>
       )}
@@ -3179,25 +3483,26 @@ const cambiarGuardado = async (reporteId: string) => {
       </Modal>
 
       {/* Perfil de la cuenta: usa siempre el UID de la sesión actual. */}
-      <Modal visible={perfilVisible} transparent animationType="slide" onRequestClose={() => setPerfilVisible(false)}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.perfilPanel}>
+      <Modal visible={perfilVisible} transparent={Platform.OS === 'web'} presentationStyle={Platform.OS === 'web' ? 'overFullScreen' : 'fullScreen'} animationType="slide" onRequestClose={() => setPerfilVisible(false)}>
+        <SafeAreaProvider style={{ flex: 1 }}>
+        <SafeAreaPantalla edges={['top', 'bottom', 'left', 'right']} style={[styles.modalOverlay, Platform.OS !== 'web' && { padding: 0, backgroundColor: '#fff' }]}>
+          <View style={[styles.perfilPanel, Platform.OS !== 'web' && { flex: 1, maxHeight: '100%', maxWidth: '100%', borderRadius: 0 }]}>
             <View style={styles.perfilCabecera}>
-              <Text style={[styles.modalTitulo, { marginBottom: 0 }]}>Mi perfil</Text>
-              <TouchableOpacity style={styles.formularioCerrar} onPress={() => setPerfilVisible(false)} accessibilityRole="button" accessibilityLabel="Cerrar mi perfil">
-                <Ico n="close" s={24} c="#333" />
+              <TouchableOpacity style={styles.formularioCerrar} onPress={() => setPerfilVisible(false)} accessibilityRole="button" accessibilityLabel="Volver desde mi perfil">
+                <Ico n="arrow-back" s={24} c="#163f30" />
               </TouchableOpacity>
+              <Text accessibilityRole="header" style={[styles.modalTitulo, { flex: 1, marginLeft: 12, marginBottom: 0, color: '#163f30' }]}>Mi perfil</Text>
             </View>
-            <ScrollView contentContainerStyle={{ padding: 18 }}>
+            <ScrollView style={[{ flexShrink: 1, minHeight: 0 }, Platform.OS !== 'web' && { flex: 1 }]} contentContainerStyle={{ padding: 18 }}>
               <View style={styles.perfilCuenta}>
-                <Ico n="person-circle-outline" s={48} c={PRIMARY_DARK} />
+                <View style={styles.perfilAvatar}><Ico n="person-outline" s={26} c={PRIMARY_DARK} /></View>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.perfilNombre}>Tu cuenta PetFind</Text>
                   <Text selectable style={styles.perfilTexto}>{auth.currentUser?.email || email}</Text>
                 </View>
               </View>
               <Text style={styles.perfilNombre}>Mis reportes</Text>
-              <Text style={[styles.perfilTexto, { marginTop: 4, marginBottom: 14 }]}>Aquí puedes administrar los reportes que publicaste con esta cuenta.</Text>
+              <Text style={[styles.perfilTexto, { marginTop: 4, marginBottom: 14 }]}>Administra tus publicaciones y consulta tus guardados.</Text>
               <View
               style={[
               styles.perfilPestanas,
@@ -3216,7 +3521,7 @@ const cambiarGuardado = async (reporteId: string) => {
       onPress={() => setPestanaPerfil(pestana)}
       style={[
         styles.perfilPestana,
-        { minWidth: 110 },
+        { minWidth: 110, flexBasis: anchoPantalla < 600 ? '45%' : '21%' },
         pestanaPerfil === pestana &&
           styles.perfilPestanaActiva,
       ]}
@@ -3264,9 +3569,19 @@ const cambiarGuardado = async (reporteId: string) => {
              : gruposPerfil[pestanaPerfil].length === 0
              ) ? (
                 <View style={styles.perfilVacio}>
-                  <Ico n="document-text-outline" s={36} c="#78877f" />
-                  <Text style={[styles.perfilNombre, { marginTop: 10 }]}>No tienes reportes {pestanaPerfil}</Text>
-                  <Text style={[styles.perfilTexto, { textAlign: 'center', marginTop: 6 }]}>Los reportes de esta categoría aparecerán aquí.</Text>
+                  <View style={styles.perfilIconoVacio}><Ico n={pestanaPerfil === 'guardados' ? 'bookmark-outline' : pestanaPerfil === 'resueltos' ? 'heart-outline' : 'document-text-outline'} s={26} c={PRIMARY_DARK} /></View>
+                  <Text style={[styles.perfilNombre, { marginTop: 8, textAlign: 'center' }]}>No tienes reportes {pestanaPerfil}</Text>
+                  <Text style={[styles.perfilTexto, { textAlign: 'center', marginTop: 6 }]}>{pestanaPerfil === 'guardados' ? 'Guarda un reporte desde su detalle para encontrarlo aquí.' : pestanaPerfil === 'resueltos' ? 'Aquí aparecerán los casos que marques como reunidos.' : pestanaPerfil === 'vencidos' ? 'Aquí aparecerán tus reportes que superen los 90 días activos.' : 'Cuando publiques una mascota perdida o encontrada, aparecerá aquí.'}</Text>
+                  {pestanaPerfil === 'activos' && (
+                    <TouchableOpacity accessibilityRole="button" accessibilityLabel="Crear reporte de mascota"
+                      style={[styles.inicioBotonPrincipal, { marginTop: 16, alignSelf: 'center' }]}
+                      onPress={() => {
+                        setPerfilVisible(false);
+                        setTimeout(() => abrirFormulario(), Platform.OS === 'ios' ? 450 : 0);
+                      }}>
+                      <IcoTexto n="add-circle-outline" s={20} c="#fff" centrado textoStyle={styles.inicioBotonTexto}>Crear reporte</IcoTexto>
+                    </TouchableOpacity>
+                  )}
                 </View>
               ) : gruposPerfil[pestanaPerfil].map((r) => (
                 <View key={r.id} style={styles.perfilReporte}>
@@ -3377,7 +3692,7 @@ const cambiarGuardado = async (reporteId: string) => {
       </View>
     ))}
               
-              <Text style={[styles.perfilTexto, { fontSize: 12, marginTop: 4, marginBottom: 18 }]}>Este listado no es un historial permanente. Los reportes resueltos se borran a los 30 días; los activos pasan a vencidos a los 90 días.</Text>
+              <Text style={[styles.perfilTexto, styles.perfilNota]}>Este listado no es un historial permanente. Los reportes resueltos se borran a los 30 días; los activos pasan a vencidos a los 90 días.</Text>
               {esAdmin && <TouchableOpacity style={[styles.perfilEnlace, { marginBottom: 10 }]} accessibilityRole="button" accessibilityLabel="Administración: revisar denuncias" onPress={() => {
                 setPerfilVisible(false); setTimeout(() => { setModeracionVisible(true); void cargarDenuncias('pendiente'); }, Platform.OS === 'ios' ? 450 : 0);
               }}><Ico n="shield-checkmark-outline" s={22} c={PRIMARY_DARK} /><Text style={{ color: PRIMARY_DARK, fontSize: 15, fontWeight: '700' }}>Revisar denuncias</Text></TouchableOpacity>}
@@ -3385,13 +3700,14 @@ const cambiarGuardado = async (reporteId: string) => {
                 <Ico n="shield-checkmark-outline" s={21} c={PRIMARY_DARK} />
                 <Text style={styles.perfilAccionTexto}>Aviso de privacidad y contacto</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={[styles.perfilEnlace, { marginTop: 10 }]} accessibilityRole="button" onPress={handleLogout}>
+              <TouchableOpacity style={[styles.perfilEnlace, { marginTop: 10, borderColor: '#eddad5', backgroundColor: '#fffafa' }]} accessibilityRole="button" onPress={handleLogout}>
                 <Ico n="log-out-outline" s={21} c="#b42318" />
                 <Text style={[styles.perfilAccionTexto, { color: '#b42318' }]}>Cerrar sesión</Text>
               </TouchableOpacity>
             </ScrollView>
           </View>
-        </View>
+        </SafeAreaPantalla>
+        </SafeAreaProvider>
       </Modal>
 
       <Modal visible={moderacionVisible} transparent animationType="slide" onRequestClose={() => { if (!resolviendoModeracion) { consultaModeracionRef.current++; setModeracionVisible(false); } }}>
@@ -3442,9 +3758,10 @@ const cambiarGuardado = async (reporteId: string) => {
       </Modal>
 
       {/* Avisos de coincidencias */}
-      <Modal visible={notifVisible} transparent animationType="slide" onRequestClose={() => setNotifVisible(false)}>
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalContenido, { maxHeight: '85%' }]}>
+      <Modal visible={notifVisible} transparent={Platform.OS === 'web'} presentationStyle={Platform.OS === 'web' ? 'overFullScreen' : 'fullScreen'} animationType="slide" onRequestClose={() => setNotifVisible(false)}>
+        <SafeAreaProvider style={{ flex: 1 }}>
+        <SafeAreaPantalla edges={['top', 'bottom', 'left', 'right']} style={[styles.modalOverlay, Platform.OS !== 'web' && { padding: 0, backgroundColor: '#fff' }]}>
+          <View style={[styles.modalContenido, { maxHeight: '85%' }, Platform.OS !== 'web' && { flex: 1, maxHeight: '100%', maxWidth: '100%', borderRadius: 0, padding: 16 }]}>
             <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
               <Text style={[styles.modalTitulo, { marginBottom: 0 }]}>Avisos</Text>
               <TouchableOpacity accessibilityRole="button" style={styles.formularioCerrar} accessibilityLabel="Cerrar avisos" onPress={() => setNotifVisible(false)}>
@@ -3462,7 +3779,7 @@ const cambiarGuardado = async (reporteId: string) => {
                 </Text>
               </View>
             ) : (
-              <ScrollView>
+              <ScrollView style={{ flexShrink: 1, minHeight: 0 }} contentContainerStyle={{ paddingBottom: 12 }}>
                 {avisosSeguidos.map(r => (
                   <TouchableOpacity key={r.id} accessibilityRole="button" style={[styles.compartirBoton, { marginBottom: 10 }]}
                     onPress={() => {
@@ -3571,16 +3888,24 @@ const cambiarGuardado = async (reporteId: string) => {
               </IcoTexto>
             </TouchableOpacity>
           </View>
-        </View>
+        </SafeAreaPantalla>
+        </SafeAreaProvider>
       </Modal>
 
       {/* Modal: Publicar Reporte */}
-      <Modal visible={modalVisible} animationType="slide" transparent onRequestClose={() => { if (!subiendo) { if (pasoReporte > 0) irAPasoReporte(pasoReporte - 1); else cerrarFormulario(); } }}>
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalContenido, { maxHeight: '92%', maxWidth: 560 }]}>
-            <View style={styles.formularioCabecera}>
-              <Text accessibilityRole="header" style={[styles.modalTitulo, { flex: 1, marginBottom: 0 }]}>
-                {editandoId ? 'Editar reporte' : 'Publicar alerta'}
+      <Modal visible={modalVisible} animationType="slide" transparent={Platform.OS === 'web'} presentationStyle={Platform.OS === 'web' ? 'overFullScreen' : 'fullScreen'} onRequestClose={() => { if (!subiendo) { if (pasoReporte > 0) irAPasoReporte(pasoReporte - 1); else cerrarFormulario(); } }}>
+        <View style={[styles.modalOverlay, Platform.OS !== 'web' && { padding: 0, backgroundColor: '#fff' }]}>
+          <SafeAreaProvider style={{ flex: 1, width: '100%' }}>
+          <SafeAreaPantalla style={{ flex: 1 }} edges={['top', 'bottom', 'left', 'right']}>
+          <KeyboardAvoidingView
+            style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            enabled={Platform.OS !== 'web'}
+          >
+          <View style={[styles.modalContenido, styles.publicarPanel, { maxHeight: '94%', paddingHorizontal: anchoPantalla < 600 ? 16 : 24, paddingVertical: 14 }, Platform.OS !== 'web' && { flex: 1, maxHeight: '100%', maxWidth: '100%', borderRadius: 0 }]}>
+            <View style={[styles.formularioCabecera, { paddingBottom: 6 }]}>
+              <Text accessibilityRole="header" style={[styles.modalTitulo, { flex: 1, marginBottom: 0, color: '#163f30' }]}>
+                {editandoId ? 'Editar reporte' : 'Publicar reporte'}
               </Text>
               <TouchableOpacity
                 onPress={cerrarFormulario}
@@ -3593,27 +3918,30 @@ const cambiarGuardado = async (reporteId: string) => {
                 <Ico n="close" s={24} c="#222" />
               </TouchableOpacity>
             </View>
-            <View accessibilityRole="progressbar" accessibilityLabel={`Paso ${pasoReporte + 1} de 3: ${PASOS_REPORTE[pasoReporte]}`} accessibilityValue={{ min: 1, max: 3, now: pasoReporte + 1 }} style={{ marginBottom: 12 }}>
-              <Text style={{ fontSize: 14, fontWeight: '700', color: PRIMARY_DARK, marginBottom: 8 }}>Paso {pasoReporte + 1} de 3 · {PASOS_REPORTE[pasoReporte]}</Text>
-              <View style={{ flexDirection: 'row', gap: 6 }}>{PASOS_REPORTE.map((t, i) => <View key={t} style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: i <= pasoReporte ? PRIMARY_DARK : '#dce6e1' }} />)}</View>
+            <View accessibilityRole="progressbar" accessibilityLabel={`Paso ${pasoReporte + 1} de 3: ${PASOS_REPORTE[pasoReporte]}`} accessibilityValue={{ min: 1, max: 3, now: pasoReporte + 1 }} style={styles.publicarProgreso}>
+              <Text style={{ fontSize: 14, fontWeight: '700', color: PRIMARY_DARK, marginBottom: 6 }}>Paso {pasoReporte + 1} de 3 · {PASOS_REPORTE[pasoReporte]}</Text>
+              <View style={{ flexDirection: 'row', gap: 6 }}>
+                {PASOS_REPORTE.map((t, i) => <View key={t} style={{ flex: 1, height: 4, borderRadius: 4, backgroundColor: i <= pasoReporte ? PRIMARY_DARK : '#d6e5dd' }} />)}
+              </View>
             </View>
-            <ScrollView key={pasoReporte} ref={formularioScrollRef} pointerEvents={subiendo ? 'none' : 'auto'} style={{ flexShrink: 1 }} keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 8 }}>
-            <Text style={styles.formularioAyuda}>Los campos con * son obligatorios.</Text>
+            <ScrollView key={pasoReporte} ref={formularioScrollRef} pointerEvents={subiendo ? 'none' : 'auto'} style={[{ flexShrink: 1, minHeight: 0 }, Platform.OS !== 'web' && { flex: 1 }]} keyboardDismissMode="none" keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 12, paddingRight: 6 }}>
+            <Text style={styles.publicarIntroduccion}>{pasoReporte === 0 ? 'Una foto clara y sus características ayudarán a reconocerla.' : pasoReporte === 1 ? 'Marca dónde ocurrió para orientar a quienes pueden ayudar.' : 'Comprueba los datos antes de compartir el reporte.'}</Text>
+            <Text style={styles.formularioAyuda}>* Campos obligatorios</Text>
             {pasosRevisados[pasoReporte] && CAMPOS_POR_PASO[pasoReporte].some((c) => erroresReporte[c]) && (
               <Text accessibilityLiveRegion="polite" style={styles.resumenErroresReporte}>Revisa los campos señalados antes de continuar.</Text>
             )}
             {pasoReporte === 0 && <>
-            <Text style={styles.formularioEtiqueta}>Tipo de reporte *</Text>
+            <Text style={styles.publicarEtiqueta}>Tipo de reporte *</Text>
             <View style={styles.selectorRow}>
               <TouchableOpacity accessibilityRole="button"
-                style={[styles.opcionBoton, tipo === 'Perdida' && styles.opcionActiva]}
+                style={[styles.publicarOpcion, tipo === 'Perdida' && styles.opcionActiva]}
                 accessibilityState={{ selected: tipo === 'Perdida' }}
                 onPress={() => setTipo('Perdida')}
               >
                 <IcoTexto n="alert-circle-outline" s={17} c={tipo === 'Perdida' ? '#fff' : '#e53935'} centrado textoStyle={tipo === 'Perdida' ? styles.textoBlanco : styles.textoNegro}>Perdida</IcoTexto>
               </TouchableOpacity>
               <TouchableOpacity accessibilityRole="button"
-                style={[styles.opcionBoton, tipo === 'Encontrada' && styles.opcionActiva]}
+                style={[styles.publicarOpcion, tipo === 'Encontrada' && styles.opcionActiva]}
                 accessibilityState={{ selected: tipo === 'Encontrada' }}
                 onPress={() => setTipo('Encontrada')}
               >
@@ -3622,13 +3950,13 @@ const cambiarGuardado = async (reporteId: string) => {
             </View>
 
             <View onLayout={(e) => { camposYRef.current.foto = e.nativeEvent.layout.y; }}>
-            <Text style={styles.formularioEtiqueta}>Foto de la mascota *</Text>
+            <Text style={styles.publicarEtiqueta}>Foto de la mascota *</Text>
 
             {fotoLocal && (
               <View style={styles.fotoElegidaContenedor}>
                 <Image
                   source={{ uri: fotoLocal }}
-                  style={styles.fotoElegidaImagen}
+                  style={styles.fotoElegidaImagen} resizeMode="contain"
                   accessibilityLabel="Foto elegida para el reporte"
                 />
                 <TouchableOpacity
@@ -3646,10 +3974,10 @@ const cambiarGuardado = async (reporteId: string) => {
               </View>
             )}
             <View style={[styles.selectorRow, errorDe('foto') && styles.campoReporteInvalido]}>
-              <TouchableOpacity accessibilityRole="button" style={styles.opcionBoton} onPress={() => elegirFoto('camara')}>
+              <TouchableOpacity accessibilityRole="button" style={styles.publicarOpcion} onPress={() => elegirFoto('camara')}>
                 <IcoTexto n="camera-outline" s={17} c="#222" centrado textoStyle={styles.textoNegro}>Tomar foto</IcoTexto>
               </TouchableOpacity>
-              <TouchableOpacity accessibilityRole="button" style={styles.opcionBoton} onPress={() => elegirFoto('galeria')}>
+              <TouchableOpacity accessibilityRole="button" style={styles.publicarOpcion} onPress={() => elegirFoto('galeria')}>
                 <IcoTexto n="images-outline" s={17} c="#222" centrado textoStyle={styles.textoNegro}>Subir foto</IcoTexto>
               </TouchableOpacity>
             </View>
@@ -3657,10 +3985,10 @@ const cambiarGuardado = async (reporteId: string) => {
             <ErrorCampoReporte mensaje={errorDe('foto')} />
             </View>
             <View onLayout={(e) => { camposYRef.current.nombre = e.nativeEvent.layout.y; }}>
-            <Text style={styles.formularioEtiqueta}>{tipo === 'Encontrada' ? 'Nombre de la mascota (si lo conoces)' : 'Nombre de la mascota o apodo *'}</Text>
-            <TextInput
+            <Text style={styles.publicarEtiqueta}>{tipo === 'Encontrada' ? 'Nombre de la mascota (si lo conoces)' : 'Nombre de la mascota o apodo *'}</Text>
+            <TextInput placeholderTextColor="#61766a"
               ref={(el) => { camposInputRef.current.nombre = el; }}
-              style={[styles.input, errorDe('nombre') && styles.campoReporteInvalido]}
+              style={[styles.publicarInput, errorDe('nombre') && styles.campoReporteInvalido]}
               accessibilityLabel={tipo === 'Encontrada' ? 'Nombre de la mascota, opcional' : 'Nombre de la mascota o apodo, obligatorio'}
               maxLength={60}
               placeholder={tipo === 'Encontrada' ? 'Si no lo sabes, déjalo vacío' : 'Nombre de la mascota o apodo'}
@@ -3670,10 +3998,10 @@ const cambiarGuardado = async (reporteId: string) => {
             <ErrorCampoReporte mensaje={errorDe('nombre')} />
             </View>
             <View onLayout={(e) => { camposYRef.current.raza = e.nativeEvent.layout.y; }}>
-            <Text style={styles.formularioEtiqueta}>Raza (opcional)</Text>
-            <TextInput
+            <Text style={styles.publicarEtiqueta}>Raza (opcional)</Text>
+            <TextInput placeholderTextColor="#61766a"
               ref={(el) => { camposInputRef.current.raza = el; }}
-              style={[styles.input, errorDe('raza') && styles.campoReporteInvalido]}
+              style={[styles.publicarInput, errorDe('raza') && styles.campoReporteInvalido]}
               accessibilityLabel="Raza (opcional)"
               maxLength={60}
               placeholder="Raza (Ej. Golden Retriever)"
@@ -3685,12 +4013,12 @@ const cambiarGuardado = async (reporteId: string) => {
             <ErrorCampoReporte mensaje={errorDe('raza')} />
             </View>
             <View onLayout={(e) => { camposYRef.current.especieOtro = e.nativeEvent.layout.y; }}>
-            <Text style={styles.formularioEtiqueta}>Especie *</Text>
+            <Text style={styles.publicarEtiqueta}>Especie *</Text>
             <View style={styles.selectorRow}>
               {(['Perro', 'Gato', 'Otro'] as const).map((op) => (
                 <TouchableOpacity accessibilityRole="button"
                   key={op}
-                  style={[styles.opcionBoton, especie === op && styles.opcionActiva]}
+                  style={[styles.publicarOpcion, especie === op && styles.opcionActiva]}
                   accessibilityState={{ selected: especie === op }}
                   accessibilityLabel={op === 'Otro' && especieOtro ? `Especie: ${especieOtro}` : `Especie: ${op}`}
                   onPress={() => {
@@ -3715,18 +4043,19 @@ const cambiarGuardado = async (reporteId: string) => {
 
             <ErrorCampoReporte mensaje={errorDe('especieOtro')} />
             </View>
+            <Text accessibilityRole="header" style={styles.publicarSeccion}>Señas para reconocerla</Text>
             <View onLayout={(e) => { camposYRef.current.colores = e.nativeEvent.layout.y; }}>
-              <Text style={styles.formularioEtiqueta}>Colores del pelaje (opcional)</Text>
+              <Text style={styles.publicarEtiqueta}>Colores del pelaje (opcional)</Text>
               <Text style={styles.formularioAyuda}>Elige hasta tres colores. Si no los conoces, deja “No sé”.</Text>
               <View style={styles.caracteristicasOpciones}>
-                <TouchableOpacity accessibilityRole="button" accessibilityState={{ selected: colores.length === 0 }} onPress={() => setColores([])} style={[styles.caracteristicaOpcion, colores.length === 0 && styles.opcionActiva]}>
+                <TouchableOpacity accessibilityRole="button" accessibilityState={{ selected: colores.length === 0 }} onPress={() => setColores([])} style={[styles.publicarChip, colores.length === 0 && styles.opcionActiva]}>
                   <Text style={colores.length === 0 ? styles.textoBlanco : styles.textoNegro}>No sé</Text>
                 </TouchableOpacity>
                 {COLORES_MASCOTA.map((op) => {
                   const elegido = colores.includes(op);
                   const bloqueado = !elegido && colores.length >= 3;
                   return <TouchableOpacity key={op} accessibilityRole="checkbox" accessibilityLabel={`Color ${op}`} accessibilityState={{ checked: elegido, disabled: bloqueado }} disabled={bloqueado}
-                    style={[styles.caracteristicaOpcion, elegido && styles.opcionActiva, bloqueado && { opacity: 0.5 }]}
+                    style={[styles.publicarChip, elegido && styles.opcionActiva, bloqueado && { opacity: 0.5 }]}
                     onPress={() => setColores((actual) => actual.includes(op) ? actual.filter((c) => c !== op) : actual.length < 3 ? [...actual, op] : actual)}>
                     <Text style={elegido ? styles.textoBlanco : styles.textoNegro}>{elegido ? `✓ ${op}` : op}</Text>
                   </TouchableOpacity>;
@@ -3736,24 +4065,24 @@ const cambiarGuardado = async (reporteId: string) => {
               <ErrorCampoReporte mensaje={errorDe('colores')} />
             </View>
             <View onLayout={(e) => { camposYRef.current.tamano = e.nativeEvent.layout.y; }}>
-              <Text style={styles.formularioEtiqueta}>Tamaño aproximado (opcional)</Text>
+              <Text style={styles.publicarEtiqueta}>Tamaño aproximado (opcional)</Text>
               <Text style={styles.formularioAyuda}>En relación con otros animales de su especie. Si dudas, elige “No sé”.</Text>
               <View style={styles.caracteristicasOpciones}>
                 {(['', ...TAMANOS_MASCOTA] as const).map((op) => <TouchableOpacity key={op || 'desconocido'} accessibilityRole="radio" accessibilityLabel={`Tamaño: ${op || 'No sé'}`} accessibilityState={{ checked: tamano === op }}
-                  style={[styles.caracteristicaOpcion, tamano === op && styles.opcionActiva]} onPress={() => setTamano(op)}>
+                  style={[styles.publicarChip, tamano === op && styles.opcionActiva]} onPress={() => setTamano(op)}>
                   <Text style={tamano === op ? styles.textoBlanco : styles.textoNegro}>{op || 'No sé'}</Text>
                 </TouchableOpacity>)}
               </View>
               <ErrorCampoReporte mensaje={errorDe('tamano')} />
             </View>
             <View onLayout={(e) => { camposYRef.current.descripcion = e.nativeEvent.layout.y; }}>
-            <Text style={styles.formularioEtiqueta}>Descripción o señas particulares (opcional)</Text>
-            <TextInput
+            <Text style={styles.publicarEtiqueta}>Descripción o señas particulares (opcional)</Text>
+            <TextInput placeholderTextColor="#61766a"
               ref={(el) => { camposInputRef.current.descripcion = el; }}
-              style={[styles.input, { minHeight: 88, textAlignVertical: 'top' }, errorDe('descripcion') && styles.campoReporteInvalido]}
+              style={[styles.publicarInput, { minHeight: 88, textAlignVertical: 'top' }, errorDe('descripcion') && styles.campoReporteInvalido]}
               accessibilityLabel="Descripción o señas particulares (opcional)"
               maxLength={500}
-              placeholder="Descripción corta o señas particulares"
+              placeholder="Ej. Lleva collar azul y tiene una mancha blanca en el pecho."
               multiline
               value={descripcion}
               onChangeText={setDescripcion}
@@ -3766,13 +4095,13 @@ const cambiarGuardado = async (reporteId: string) => {
               <>
                 <View style={styles.selectorRow}>
                   <TouchableOpacity accessibilityRole="button"
-                    style={[styles.opcionBoton, !hayRecompensa && styles.opcionActiva]}
+                    style={[styles.publicarOpcion, !hayRecompensa && styles.opcionActiva]}
                     onPress={() => setHayRecompensa(false)}
                   >
                     <Text style={!hayRecompensa ? styles.textoBlanco : styles.textoNegro}>Sin recompensa</Text>
                   </TouchableOpacity>
                   <TouchableOpacity accessibilityRole="button"
-                    style={[styles.opcionBoton, hayRecompensa && styles.opcionActiva]}
+                    style={[styles.publicarOpcion, hayRecompensa && styles.opcionActiva]}
                     onPress={() => setHayRecompensa(true)}
                   >
                     <IcoTexto n="gift-outline" s={17} c={hayRecompensa ? '#fff' : '#222'} centrado textoStyle={hayRecompensa ? styles.textoBlanco : styles.textoNegro}>Ofrezco recompensa</IcoTexto>
@@ -3780,11 +4109,11 @@ const cambiarGuardado = async (reporteId: string) => {
                 </View>
                 {hayRecompensa && (
                   <View>
-                  <Text style={styles.formularioEtiqueta}>Monto o detalle de recompensa (opcional)</Text>
-                  <TextInput
+                  <Text style={styles.publicarEtiqueta}>Monto o detalle de recompensa (opcional)</Text>
+                  <TextInput placeholderTextColor="#61766a"
                     ref={(el) => { camposInputRef.current.recompensa = el; }}
                     accessibilityLabel="Monto o detalle de recompensa, opcional"
-                    style={[styles.input, errorDe('recompensa') && styles.campoReporteInvalido]}
+                    style={[styles.publicarInput, errorDe('recompensa') && styles.campoReporteInvalido]}
                     placeholder="Monto o detalle (Ej. $500) — opcional"
                     maxLength={100}
                     value={recompensaTexto}
@@ -3801,7 +4130,7 @@ const cambiarGuardado = async (reporteId: string) => {
             {pasoReporte === 1 && <>
             {!editandoId && (
             <>
-            <Text style={styles.formularioEtiqueta}>
+            <Text style={styles.publicarEtiqueta}>
               {tipo === 'Perdida' ? '¿Cuándo se perdió?' : '¿Cuándo la encontraste?'}
             </Text>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
@@ -3809,7 +4138,7 @@ const cambiarGuardado = async (reporteId: string) => {
                 <TouchableOpacity
                   key={o.id}
                   style={[
-                    styles.formularioOpcionFecha,
+                    styles.publicarFecha,
                     opcionCuando === o.id && styles.opcionActiva,
                   ]}
                   onPress={() => setOpcionCuando(o.id)}
@@ -3825,9 +4154,9 @@ const cambiarGuardado = async (reporteId: string) => {
             )}
 
             <View onLayout={(e) => { camposYRef.current.coords = e.nativeEvent.layout.y; }}>
-            <Text style={styles.formularioEtiqueta}>Ubicación de la mascota *</Text>
+            <Text style={styles.publicarEtiqueta}>Ubicación de la mascota *</Text>
             <TouchableOpacity accessibilityRole="button"
-              style={[styles.opcionBoton, { marginBottom: 8, alignItems: 'center' }]}
+              style={[styles.publicarOpcion, { marginBottom: 8, alignItems: 'center' }]}
               onPress={usarMiUbicacion}
               disabled={obteniendoUbicacion}
             >
@@ -3874,10 +4203,10 @@ const cambiarGuardado = async (reporteId: string) => {
             <ErrorCampoReporte mensaje={errorDe('coords')} />
             </View>
             <View onLayout={(e) => { camposYRef.current.ubicacion = e.nativeEvent.layout.y; }}>
-            <Text style={styles.formularioEtiqueta}>Referencia de ubicación (opcional)</Text>
-            <TextInput
+            <Text style={styles.publicarEtiqueta}>Referencia de ubicación (opcional)</Text>
+            <TextInput placeholderTextColor="#61766a"
               ref={(el) => { camposInputRef.current.ubicacion = el; }}
-              style={[styles.input, errorDe('ubicacion') && styles.campoReporteInvalido]}
+              style={[styles.publicarInput, errorDe('ubicacion') && styles.campoReporteInvalido]}
               accessibilityLabel="Referencia de ubicación (opcional)"
               maxLength={150}
               placeholder="Ubicación (Ej. Col. Linda Vista)"
@@ -3892,10 +4221,10 @@ const cambiarGuardado = async (reporteId: string) => {
               Datos de contacto (se mostrarán a quien consulte el reporte)
             </Text>
             <View onLayout={(e) => { camposYRef.current.contactoNombre = e.nativeEvent.layout.y; }}>
-            <Text style={styles.formularioEtiqueta}>Tu nombre *</Text>
-            <TextInput
+            <Text style={styles.publicarEtiqueta}>Tu nombre *</Text>
+            <TextInput placeholderTextColor="#61766a"
               ref={(el) => { camposInputRef.current.contactoNombre = el; }}
-              style={[styles.input, errorDe('contactoNombre') && styles.campoReporteInvalido]}
+              style={[styles.publicarInput, errorDe('contactoNombre') && styles.campoReporteInvalido]}
               accessibilityLabel="Tu nombre (obligatorio)"
               maxLength={60}
               placeholder="Tu nombre"
@@ -3905,10 +4234,10 @@ const cambiarGuardado = async (reporteId: string) => {
             <ErrorCampoReporte mensaje={errorDe('contactoNombre')} />
             </View>
             <View onLayout={(e) => { camposYRef.current.telefono = e.nativeEvent.layout.y; }}>
-            <Text style={styles.formularioEtiqueta}>Teléfono / WhatsApp *</Text>
-            <TextInput
+            <Text style={styles.publicarEtiqueta}>Teléfono / WhatsApp *</Text>
+            <TextInput placeholderTextColor="#61766a"
               ref={(el) => { camposInputRef.current.telefono = el; }}
-              style={[styles.input, errorDe('telefono') && styles.campoReporteInvalido]}
+              style={[styles.publicarInput, errorDe('telefono') && styles.campoReporteInvalido]}
               accessibilityLabel="Teléfono / WhatsApp (obligatorio)"
               placeholder="Teléfono / WhatsApp (10 a 15 dígitos)"
               keyboardType="phone-pad"
@@ -3919,28 +4248,29 @@ const cambiarGuardado = async (reporteId: string) => {
 
             <ErrorCampoReporte mensaje={errorDe('telefono')} />
             </View>
-            <View style={styles.revisionReporte}>
-              <Text accessibilityRole="header" style={styles.formularioEtiqueta}>Revisa antes de {editandoId ? 'guardar' : 'publicar'}</Text>
-              {fotoLocal && <Image source={{ uri: fotoLocal }} style={{ width: '100%', height: 140, borderRadius: 8, marginBottom: 10 }} resizeMode="contain" accessibilityLabel="Foto que se publicará" />}
+            <View style={styles.publicarRevision}>
+              <Text accessibilityRole="header" style={styles.publicarEtiqueta}>Revisa antes de {editandoId ? 'guardar' : 'publicar'}</Text>
+              {fotoLocal && <Image source={{ uri: fotoLocal }} style={{ width: '100%', height: 160, borderRadius: 14, backgroundColor: '#e8f2ec', marginBottom: 12 }} resizeMode="contain" accessibilityLabel="Foto que se publicará" />}
               <Text style={styles.revisionTexto}>{nombre.trim() || 'Nombre desconocido'} · {tipo}</Text>
               <Text style={styles.revisionTexto}>{especie === 'Otro' ? especieOtro : especie} · {raza.trim() || 'Raza sin especificar'}</Text>
               <Text style={styles.revisionTexto}>Colores: {colores.length ? colores.join(', ') : 'No sé'} · Tamaño: {tamano || 'No sé'}</Text>
               <Text style={styles.revisionTexto}>{descripcion.trim() || 'Sin descripción adicional'}</Text>
               <Text style={styles.revisionTexto}>{tipo === 'Perdida' && hayRecompensa ? `Recompensa: ${recompensaTexto.trim() || 'Ofrecida, sin monto indicado'}` : 'Sin recompensa'}</Text>
               <TouchableOpacity onPress={() => irAPasoReporte(0)} accessibilityRole="button" style={styles.revisionEditar}><Text style={styles.revisionEnlace}>Editar datos de la mascota</Text></TouchableOpacity>
+              <Text accessibilityRole="header" style={styles.publicarSeccion}>Ubicación y fecha</Text>
               <Text style={styles.revisionTexto}>{ubicacion.trim() || 'Ubicación marcada en el mapa'}</Text>
-              <Text style={styles.revisionTexto}>{coordsReporte ? `Punto confirmado: ${coordsReporte.lat.toFixed(5)}, ${coordsReporte.lng.toFixed(5)}` : 'Ubicación pendiente'}</Text>
+              <IcoTexto n={coordsReporte ? 'checkmark-circle-outline' : 'location-outline'} c={PRIMARY_DARK} textoStyle={styles.revisionTexto}>{coordsReporte ? 'Punto confirmado en el mapa' : 'Ubicación pendiente'}</IcoTexto>
               <Text style={styles.revisionTexto}>{editandoId ? 'Se conservará la fecha original del reporte.' : `Momento del suceso: ${OPCIONES_CUANDO.find((o) => o.id === opcionCuando)?.label ?? 'Ahora'} (aproximado)`}</Text>
               <TouchableOpacity onPress={() => irAPasoReporte(1)} accessibilityRole="button" style={styles.revisionEditar}><Text style={styles.revisionEnlace}>Editar ubicación y fecha</Text></TouchableOpacity>
+              <Text accessibilityRole="header" style={styles.publicarSeccion}>Contacto</Text>
               <Text style={styles.revisionTexto}>Contacto: {contactoNombre.trim() || 'Pendiente'} · {telefono.trim() || 'Teléfono pendiente'}</Text>
             </View>
             <Text style={styles.formularioAyuda}>{editandoId ? 'Guardar cambios actualizará tu reporte.' : 'Publicar reporte hará visibles la foto, la ubicación y los datos de contacto a quienes tienen sesión en PetFind.'}</Text>
             </>}
-            </ScrollView>
-            <View style={styles.pasosReportePie}>
+            <View style={[styles.pasosReportePie, { borderTopColor: '#dce9e2', paddingTop: 12 }]}>
               <View style={{ flexDirection: 'row', gap: 10 }}>
-                {pasoReporte > 0 && <TouchableOpacity style={styles.pasoReporteAtras} disabled={subiendo} onPress={() => irAPasoReporte(pasoReporte - 1)} accessibilityRole="button"><Text style={{ fontWeight: '600', color: '#333' }}>Atrás</Text></TouchableOpacity>}
-                <TouchableOpacity style={[styles.pasoReporteSiguiente, subiendo && { opacity: 0.5 }]} disabled={subiendo}
+                {pasoReporte > 0 && <TouchableOpacity style={[styles.pasoReporteAtras, { borderRadius: 14, borderColor: '#cce0d5', backgroundColor: '#f5faf7' }]} disabled={subiendo} onPress={() => irAPasoReporte(pasoReporte - 1)} accessibilityRole="button"><Text style={{ fontWeight: '600', color: '#333' }}>Atrás</Text></TouchableOpacity>}
+                <TouchableOpacity style={[styles.pasoReporteSiguiente, { borderRadius: 14 }, subiendo && { opacity: 0.5 }]} disabled={subiendo}
                   onPress={() => { if (pasoReporte < 2) siguientePasoReporte(); else void guardarReporte(); }} accessibilityRole="button">
                   <Text style={[styles.textoBlanco, { textAlign: 'center' }]}>{subiendo ? 'Guardando…' : pasoReporte < 2 ? 'Siguiente' : editandoId ? 'Guardar cambios' : 'Publicar reporte'}</Text>
                 </TouchableOpacity>
@@ -3949,11 +4279,16 @@ const cambiarGuardado = async (reporteId: string) => {
                 <Text style={{ color: '#555', fontSize: 13 }}>{editandoId ? 'Cancelar edición' : 'Cancelar reporte'}</Text>
               </TouchableOpacity>
             </View>
+            </ScrollView>
           </View>
+          </KeyboardAvoidingView>
+          </SafeAreaPantalla>
+          </SafeAreaProvider>
 
           {/* Selector anidado: Cancelar y Atrás no modifican el formulario. */}
           <Modal visible={selectorUbicacionVisible} animationType="slide" onRequestClose={cerrarSelectorUbicacion}>
-            <SafeAreaView style={styles.selectorPantalla}>
+            <SafeAreaProvider style={styles.selectorPantalla}>
+            <SafeAreaPantalla style={styles.selectorPantalla} edges={['top', 'bottom', 'left', 'right']}>
               <View style={styles.selectorCabecera}>
                 <Text accessibilityRole="header" style={styles.selectorTitulo}>Ubicación de la mascota</Text>
                 <TouchableOpacity style={styles.formularioCerrar} onPress={cerrarSelectorUbicacion} accessibilityRole="button" accessibilityLabel="Cerrar mapa sin cambiar la ubicación">
@@ -3967,7 +4302,7 @@ const cambiarGuardado = async (reporteId: string) => {
                   <Text style={{ color: PRIMARY_DARK, fontWeight: '600' }}>{localizandoSelector ? 'Buscando ubicación…' : 'Centrar en mi ubicación'}</Text>
                 </TouchableOpacity>
               </View>
-              <View style={{ flex: 1, backgroundColor: '#edf2ee' }}>
+              <View style={{ flex: 1, minHeight: 0, backgroundColor: '#edf2ee' }}>
                 {selectorUbicacionVisible && <VistaHtml html={selectorAmplioHtml} scrollEnabled={false} onMensaje={alMoverSelector} />}
               </View>
               <View style={styles.selectorPie}>
@@ -3982,7 +4317,8 @@ const cambiarGuardado = async (reporteId: string) => {
                   </TouchableOpacity>
                 </View>
               </View>
-            </SafeAreaView>
+            </SafeAreaPantalla>
+            </SafeAreaProvider>
           </Modal>
 
           {/* Ventana pequeña: especificar la especie cuando se elige "Otro" */}
@@ -4029,123 +4365,44 @@ const cambiarGuardado = async (reporteId: string) => {
       </Modal>
 
       {/* Pantalla de detalle de un reporte */}
-      <Modal visible={detalleVisible} animationType="slide" transparent onRequestClose={() => setDetalleVisible(false)}>
-        <SafeAreaView style={[styles.detalleFondo, { padding: anchoPantalla >= 700 ? 16 : 0 }]}>
-          <View style={[styles.detallePanel, { borderRadius: anchoPantalla >= 700 ? 16 : 0 }]}>
+      <Modal visible={detalleVisible} animationType="slide" transparent={Platform.OS === 'web'} presentationStyle={Platform.OS === 'web' ? 'overFullScreen' : 'fullScreen'} onRequestClose={() => setDetalleVisible(false)}>
+        <SafeAreaProvider style={{ flex: 1 }}>
+        <SafeAreaPantalla edges={['top', 'bottom', 'left', 'right']} style={[styles.detalleFondo, { padding: Platform.OS === 'web' && anchoPantalla >= 700 ? 16 : 0 }, Platform.OS !== 'web' && { backgroundColor: '#fff' }]}>
+          <View style={[styles.detallePanel, { borderRadius: Platform.OS === 'web' && anchoPantalla >= 700 ? 16 : 0 }]}>
           <View style={styles.detalleCabecera}>
-            <Text accessibilityRole="header" style={{ flex: 1, fontSize: 18, fontWeight: '700', color: '#222' }}>Detalle del reporte</Text>
-            <TouchableOpacity style={styles.detalleCerrar} onPress={() => setDetalleVisible(false)} accessibilityRole="button" accessibilityLabel="Cerrar detalle del reporte">
-              <Ico n="close" s={24} c="#333" />
+            <TouchableOpacity style={styles.detalleCerrar} onPress={() => setDetalleVisible(false)} accessibilityRole="button" accessibilityLabel="Volver desde el detalle del reporte">
+              <Ico n="arrow-back" s={24} c="#163f30" />
             </TouchableOpacity>
+            <Text accessibilityRole="header" style={{ flex: 1, fontSize: 18, fontWeight: '700', color: '#222' }}>Detalle del reporte</Text>
           </View>
           {mascotaDetalle && (
             <>
-              <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 24 }}>
-                <View>
-                  <Image source={{ uri: mascotaDetalle.foto }} style={[styles.detalleFoto, { height: Math.min(360, Math.max(220, anchoPantalla * 0.6)) }]} resizeMode="contain" accessibilityLabel={`Foto de ${mascotaDetalle.nombre}`} />
-                </View>
-
-                <View style={{ padding: 18 }}>
+              <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.detalleContenido}>
+                <View style={[styles.detalleResumen, { flexDirection: anchoPantalla >= 900 ? 'row' : 'column' }]}>
+                  <View style={[styles.detalleMarcoFoto, anchoPantalla >= 900 ? { width: '42%' } : { width: '100%' }]}>
+                    <Image source={{ uri: mascotaDetalle.foto }} style={[styles.detalleFoto, { height: anchoPantalla >= 900 ? 330 : 240 }]} resizeMode="contain" accessibilityLabel={`Foto de ${mascotaDetalle.nombre}`} />
+                  </View>
+                  <View style={[styles.detalleDatosResumen, anchoPantalla >= 900 ? { flex: 1 } : { width: '100%' }]}> 
                   <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
                     <Text style={styles.detalleNombre}>{mascotaDetalle.nombre}</Text>
                     <View
                       style={[
                         styles.badge,
-                        { backgroundColor: mascotaDetalle.tipo === 'Perdida' ? '#ffebee' : '#e8f5e9' },
+                        { backgroundColor: mascotaDetalle.estado === 'Reunida' ? '#e3f5ed' : mascotaDetalle.estado === 'Vencida' ? '#f1f3f2' : mascotaDetalle.tipo === 'Perdida' ? '#fff0ec' : '#e3f5ed' },
                       ]}
                     >
                       <Text
                         style={{
-                          color: mascotaDetalle.tipo === 'Perdida' ? '#c62828' : '#2e7d32',
+                          color: mascotaDetalle.estado === 'Vencida' ? '#586960' : mascotaDetalle.estado === 'Reunida' ? PRIMARY_DARK : mascotaDetalle.tipo === 'Perdida' ? '#b42318' : PRIMARY_DARK,
                           fontWeight: 'bold',
                           fontSize: 11,
                         }}
                       >
-                        {mascotaDetalle.tipo === 'Perdida' ? 'PERDIDO' : 'ENCONTRADO'}
+                        {mascotaDetalle.estado === 'Reunida' ? 'REUNIDA' : mascotaDetalle.estado === 'Vencida' ? 'VENCIDO' : mascotaDetalle.tipo === 'Perdida' ? 'SE BUSCA' : 'ENCONTRADA'}
                       </Text>
                     </View>
                   </View>
 
-                  <TouchableOpacity accessibilityRole="button" accessibilityLabel="Compartir reporte: revisar imagen y datos antes de enviar" onPress={abrirCompartir}
-                    style={[styles.compartirBoton, { marginTop: 14, marginBottom: 8 }]}>
-                    <IcoTexto n="share-social-outline" s={20} c={PRIMARY_DARK} centrado textoStyle={{ color: PRIMARY_DARK, fontSize: 14, fontWeight: '700' }}>Compartir reporte</IcoTexto>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-  accessibilityRole="button"
-  accessibilityState={{
-    disabled: !favoritos.listo || guardadoOcupado,
-  }}
-  disabled={!favoritos.listo || guardadoOcupado}
-  style={[
-    styles.compartirBoton,
-    { marginBottom: 8 },
-  ]}
-  onPress={() => {
-    if (mascotaDetalle) {
-      void cambiarGuardado(mascotaDetalle.id);
-    }
-  }}
->
-  <IcoTexto
-    n={
-      favoritos.ids.includes(mascotaDetalle.id)
-        ? 'bookmark'
-        : 'bookmark-outline'
-    }
-    s={20}
-    c={PRIMARY_DARK}
-    centrado
-    textoStyle={{
-      color: PRIMARY_DARK,
-      fontWeight: '700',
-    }}
-  >
-    {guardadoOcupado
-      ? 'Actualizando…'
-      : !favoritos.listo
-      ? 'Guardados no disponibles'
-      : favoritos.ids.includes(mascotaDetalle.id)
-      ? 'Quitar de guardados'
-      : 'Guardar reporte'}
-  </IcoTexto>
-</TouchableOpacity>
-
-{mascotaDetalle.tipo === 'Perdida' && favoritos.ids.includes(mascotaDetalle.id)
-  && mascotaDetalle.autorId !== auth.currentUser?.uid && mascotaDetalle.estado !== 'Reunida' && mascotaDetalle.estado !== 'Vencida' && (
-  <TouchableOpacity accessibilityRole="switch" accessibilityState={{ checked: !!seguimiento?.[mascotaDetalle.id]?.desde, disabled: guardadoOcupado }}
-    disabled={guardadoOcupado} style={styles.compartirBoton}
-    onPress={() => void cambiarAvisos(mascotaDetalle.id, !seguimiento?.[mascotaDetalle.id]?.desde)}>
-    <Text style={styles.compartirTexto}>Avisarme si la ven · {seguimiento?.[mascotaDetalle.id]?.desde ? 'Activado' : 'Desactivado'}</Text>
-  </TouchableOpacity>
-)}
-{mascotaDetalle.tipo === 'Perdida' && (favoritos.ids.includes(mascotaDetalle.id) || mascotaDetalle.autorId === auth.currentUser?.uid) && (
-  <View style={{ marginVertical: 10 }}>
-    <TouchableOpacity accessibilityRole="button" accessibilityState={{ expanded: cronologiaAbierta }}
-      style={styles.compartirBoton} onPress={() => setCronologiaAbierta(v => !v)}>
-      <Text style={styles.compartirTexto}>{cronologiaAbierta ? 'Ocultar cronología' : 'Ver cronología del caso'}</Text>
-    </TouchableOpacity>
-    {detalleVisible && cronologiaAbierta && <Cronologia key={mascotaDetalle.id}
-      reporte={reportes.find(r => r.id === mascotaDetalle.id) || mascotaDetalle} />}
-  </View>
-)}
-{!!favoritos.error && (
-  <View>
-    <ErrorCampoReporte mensaje={favoritos.error} />
-    <TouchableOpacity
-      accessibilityRole="button"
-      style={styles.compartirBoton}
-      onPress={reintentarGuardados}
-    >
-      <Text style={styles.compartirTexto}>
-        Reintentar carga de guardados
-      </Text>
-    </TouchableOpacity>
-  </View>
-)}
-                  {mascotaDetalle.tipo === 'Perdida' && (mascotaDetalle.autorId === auth.currentUser?.uid || (mascotaDetalle.estado !== 'Reunida' && mascotaDetalle.estado !== 'Vencida')) && <TouchableOpacity accessibilityRole="button" style={[styles.compartirBoton, { marginBottom: 8 }]} onPress={() => abrirAvistamientos(mascotaDetalle)}><IcoTexto n="eye-outline" s={20} c={PRIMARY_DARK} centrado textoStyle={{ color: PRIMARY_DARK, fontWeight: '700' }}>{mascotaDetalle.autorId === auth.currentUser?.uid ? 'Avistamientos recibidos' : 'Reportar avistamiento'}</IcoTexto></TouchableOpacity>}
-                  {mascotaDetalle.autorId !== auth.currentUser?.uid && <TouchableOpacity accessibilityRole="button" style={{ minHeight: 44, justifyContent: 'center', alignItems: 'center', marginBottom: 8 }} onPress={() => {
-                    setMotivoDenuncia(MOTIVOS_DENUNCIA[0]); setDetalleDenuncia(''); setErrorDenuncia(''); setDenunciaVisible(true);
-                  }}><IcoTexto n="flag-outline" s={18} c="#9f331e" centrado textoStyle={{ color: '#9f331e', fontWeight: '600', fontSize: 14 }}>Denunciar publicación</IcoTexto></TouchableOpacity>}
                   {mascotaDetalle.recompensa ? (
                     <View style={styles.detalleRecompensa}>
                       <IcoTexto n="gift" s={17} c="#8a5a00" textoStyle={{ color: '#8a5a00', fontWeight: 'bold' }}>
@@ -4190,6 +4447,8 @@ const cambiarGuardado = async (reporteId: string) => {
                     ) : null}
                   </View>
 
+                  </View>
+                </View>
                   {mascotaDetalle.descripcion ? (
                     <View style={{ marginTop: 10 }}>
                       <Text style={styles.detalleSeccion}>DESCRIPCIÓN</Text>
@@ -4197,6 +4456,92 @@ const cambiarGuardado = async (reporteId: string) => {
                     </View>
                   ) : null}
 
+                <View style={styles.detalleSeguimiento}>
+                  <Text accessibilityRole="header" style={styles.detalleTituloSeccion}>Comparte y sigue el caso</Text>
+                  <View style={styles.detalleAtajos}>
+                  <TouchableOpacity accessibilityRole="button" accessibilityLabel="Compartir reporte: revisar imagen y datos antes de enviar" onPress={abrirCompartir}
+                    style={[styles.detalleAccionSuave, styles.detalleAtajo]}>
+                    <IcoTexto n="share-social-outline" s={20} c={PRIMARY_DARK} centrado textoStyle={{ color: PRIMARY_DARK, fontSize: 14, fontWeight: '700' }}>Compartir reporte</IcoTexto>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+  accessibilityRole="button"
+  accessibilityState={{
+    disabled: !favoritos.listo || guardadoOcupado,
+  }}
+  disabled={!favoritos.listo || guardadoOcupado}
+  style={[
+    styles.detalleAccionSuave, styles.detalleAtajo,
+    { opacity: !favoritos.listo || guardadoOcupado ? 0.55 : 1 },
+  ]}
+  onPress={() => {
+    if (mascotaDetalle) {
+      void cambiarGuardado(mascotaDetalle.id);
+    }
+  }}
+>
+  <IcoTexto
+    n={
+      favoritos.ids.includes(mascotaDetalle.id)
+        ? 'bookmark'
+        : 'bookmark-outline'
+    }
+    s={20}
+    c={PRIMARY_DARK}
+    centrado
+    textoStyle={{
+      color: PRIMARY_DARK,
+      fontWeight: '700',
+    }}
+  >
+    {guardadoOcupado
+      ? 'Actualizando…'
+      : !favoritos.listo
+      ? 'Guardados no disponibles'
+      : favoritos.ids.includes(mascotaDetalle.id)
+      ? 'Quitar de guardados'
+      : 'Guardar reporte'}
+  </IcoTexto>
+</TouchableOpacity>
+                  </View>
+
+{mascotaDetalle.tipo === 'Perdida' && favoritos.ids.includes(mascotaDetalle.id)
+  && mascotaDetalle.autorId !== auth.currentUser?.uid && mascotaDetalle.estado !== 'Reunida' && mascotaDetalle.estado !== 'Vencida' && (
+  <TouchableOpacity accessibilityRole="switch" accessibilityState={{ checked: !!seguimiento?.[mascotaDetalle.id]?.desde, disabled: guardadoOcupado }}
+    disabled={guardadoOcupado} style={styles.detalleAccionSuave}
+    onPress={() => void cambiarAvisos(mascotaDetalle.id, !seguimiento?.[mascotaDetalle.id]?.desde)}>
+    <Text style={styles.compartirTexto}>Avisarme si la ven · {seguimiento?.[mascotaDetalle.id]?.desde ? 'Activado' : 'Desactivado'}</Text>
+  </TouchableOpacity>
+)}
+{mascotaDetalle.tipo === 'Perdida' && (favoritos.ids.includes(mascotaDetalle.id) || mascotaDetalle.autorId === auth.currentUser?.uid) && (
+  <View style={{ marginVertical: 10 }}>
+    <TouchableOpacity accessibilityRole="button" accessibilityState={{ expanded: cronologiaAbierta }}
+      style={styles.detalleAccionSuave} onPress={() => setCronologiaAbierta(v => !v)}>
+      <Text style={styles.compartirTexto}>{cronologiaAbierta ? 'Ocultar cronología' : 'Ver cronología del caso'}</Text>
+    </TouchableOpacity>
+    {detalleVisible && cronologiaAbierta && <Cronologia key={mascotaDetalle.id}
+      reporte={reportes.find(r => r.id === mascotaDetalle.id) || mascotaDetalle} />}
+  </View>
+)}
+{!!favoritos.error && (
+  <View>
+    <ErrorCampoReporte mensaje={favoritos.error} />
+    <TouchableOpacity
+      accessibilityRole="button"
+      style={styles.detalleAccionSuave}
+      onPress={reintentarGuardados}
+    >
+      <Text style={styles.compartirTexto}>
+        Reintentar carga de guardados
+      </Text>
+    </TouchableOpacity>
+  </View>
+)}
+                  {mascotaDetalle.tipo === 'Perdida' && (mascotaDetalle.autorId === auth.currentUser?.uid || (mascotaDetalle.estado !== 'Reunida' && mascotaDetalle.estado !== 'Vencida')) && <TouchableOpacity accessibilityRole="button" style={[styles.detalleAccionSuave, { marginBottom: 8 }]} onPress={() => abrirAvistamientos(mascotaDetalle)}><IcoTexto n="eye-outline" s={20} c={PRIMARY_DARK} centrado textoStyle={{ color: PRIMARY_DARK, fontWeight: '700' }}>{mascotaDetalle.autorId === auth.currentUser?.uid ? 'Avistamientos recibidos' : 'Reportar avistamiento'}</IcoTexto></TouchableOpacity>}
+                  {mascotaDetalle.autorId !== auth.currentUser?.uid && <TouchableOpacity accessibilityRole="button" style={{ minHeight: 44, justifyContent: 'center', alignItems: 'center', marginBottom: 8 }} onPress={() => {
+                    setMotivoDenuncia(MOTIVOS_DENUNCIA[0]); setDetalleDenuncia(''); setErrorDenuncia(''); setDenunciaVisible(true);
+                  }}><IcoTexto n="flag-outline" s={18} c="#9f331e" centrado textoStyle={{ color: '#9f331e', fontWeight: '600', fontSize: 14 }}>Denunciar publicación</IcoTexto></TouchableOpacity>}
+                </View>
+                <View style={styles.detalleUbicacion}>
                   <Text style={[styles.detalleSeccion, { marginTop: 16 }]}>UBICACIÓN EN EL MAPA</Text>
                   <View style={styles.detalleMapa}>
                     <VistaHtml
@@ -4216,7 +4561,7 @@ const cambiarGuardado = async (reporteId: string) => {
                 <View style={[styles.detalleAcciones, { flexWrap: 'wrap' }]}>
                   {mascotaDetalle.estado !== 'Reunida' && (
                     <TouchableOpacity accessibilityRole="button"
-                      style={[styles.detalleBoton, { backgroundColor: PRIMARY_DARK, flexBasis: '100%' }]}
+                      style={[styles.detalleBoton, { backgroundColor: PRIMARY_DARK, flexBasis: anchoPantalla >= 700 ? '45%' : '100%' }]}
                       onPress={() => marcarReunida(mascotaDetalle)}
                     >
                       <IcoTexto n="checkmark-circle" s={19} c="#fff" centrado textoStyle={styles.detalleBotonTexto}>
@@ -4226,26 +4571,26 @@ const cambiarGuardado = async (reporteId: string) => {
                   )}
                   {mascotaDetalle.estado !== 'Reunida' && (
                     <TouchableOpacity accessibilityRole="button"
-                      style={[styles.detalleBoton, { backgroundColor: '#555' }]}
+                      style={[styles.detalleBoton, { backgroundColor: '#edf7f2', borderWidth: 1, borderColor: '#cce3d7' }]}
                       onPress={() => abrirEdicion(mascotaDetalle)}
                     >
-                      <IcoTexto n="create-outline" s={18} c="#fff" centrado textoStyle={styles.detalleBotonTexto}>Editar</IcoTexto>
+                      <IcoTexto n="create-outline" s={18} c={PRIMARY_DARK} centrado textoStyle={[styles.detalleBotonTexto, { color: PRIMARY_DARK }]}>Editar</IcoTexto>
                     </TouchableOpacity>
                   )}
                   <TouchableOpacity accessibilityRole="button"
-                    style={[styles.detalleBoton, { backgroundColor: '#d32f2f' }]}
+                    style={[styles.detalleBoton, { backgroundColor: '#fff', borderWidth: 1, borderColor: '#efd5d0' }]}
                     onPress={() => eliminarReporte(mascotaDetalle)}
                   >
-                    <IcoTexto n="trash-outline" s={18} c="#fff" centrado textoStyle={styles.detalleBotonTexto}>Eliminar</IcoTexto>
+                    <IcoTexto n="trash-outline" s={18} c="#a93425" centrado textoStyle={[styles.detalleBotonTexto, { color: '#a93425' }]}>Eliminar</IcoTexto>
                   </TouchableOpacity>
                 </View>
               ) : mascotaDetalle.telefono ? (
                 <View style={styles.detalleAcciones}>
                   <TouchableOpacity accessibilityRole="button"
-                    style={[styles.detalleBoton, { backgroundColor: '#555' }]}
+                    style={[styles.detalleBoton, { backgroundColor: '#edf7f2', borderWidth: 1, borderColor: '#cce3d7' }]}
                     onPress={() => contactar('llamar', mascotaDetalle)}
                   >
-                    <IcoTexto n="call" s={18} c="#fff" centrado textoStyle={styles.detalleBotonTexto}>Llamar</IcoTexto>
+                    <IcoTexto n="call" s={18} c={PRIMARY_DARK} centrado textoStyle={[styles.detalleBotonTexto, { color: PRIMARY_DARK }]}>Llamar</IcoTexto>
                   </TouchableOpacity>
                   <TouchableOpacity accessibilityRole="button"
                     style={[styles.detalleBoton, { backgroundColor: '#1a7f37' }]}
@@ -4365,26 +4710,62 @@ const cambiarGuardado = async (reporteId: string) => {
               <TouchableOpacity accessibilityRole="button" disabled={enviandoDenuncia} style={[styles.compartirBoton, { backgroundColor: PRIMARY_DARK }]} onPress={() => { void enviarDenuncia(); }}><Text style={styles.textoBlanco}>{enviandoDenuncia ? 'Enviando…' : 'Enviar denuncia'}</Text></TouchableOpacity>
             </View></View>
           </Modal>
-        </SafeAreaView>
+        </SafeAreaPantalla>
+        </SafeAreaProvider>
       </Modal>
 
       {/* Elegir imagen del escáner, independiente del borrador del reporte. */}
       <Modal visible={origenEscanerVisible} transparent animationType="fade" onRequestClose={() => { if (!eligiendoEscaner) setOrigenEscanerVisible(false); }}>
         <View style={styles.modalOverlay}>
-          <View style={[styles.modalContenido, { width: '100%', maxWidth: 400 }]}>
-            <Text accessibilityRole="header" style={styles.modalTitulo}>Escanear mascota</Text>
-            <Text style={{ color: '#555', lineHeight: 21, marginBottom: 18 }}>Toma una foto o selecciona una imagen clara para buscar posibles coincidencias.</Text>
-            <TouchableOpacity disabled={eligiendoEscaner} onPress={() => { void escanearFoto('camara'); }} accessibilityRole="button"
-              style={[styles.botonGuardar, { minHeight: 48, justifyContent: 'center', marginBottom: 12, opacity: eligiendoEscaner ? 0.5 : 1 }]}>
-              <IcoTexto n="camera-outline" s={22} c="#fff" centrado textoStyle={styles.textoBlanco}>Tomar foto</IcoTexto>
-            </TouchableOpacity>
-            <TouchableOpacity disabled={eligiendoEscaner} onPress={() => { void escanearFoto('galeria'); }} accessibilityRole="button"
-              style={[styles.botonGuardar, { minHeight: 48, justifyContent: 'center', marginBottom: 12, opacity: eligiendoEscaner ? 0.5 : 1 }]}>
-              <IcoTexto n="images-outline" s={22} c="#fff" centrado textoStyle={styles.textoBlanco}>Subir desde galería</IcoTexto>
-            </TouchableOpacity>
+          <View style={[styles.modalContenido, { width: '100%', maxWidth: 460, maxHeight: '92%', borderRadius: 24, padding: 20 }]}>
+            <View style={styles.formularioCabecera}>
+              <Text accessibilityRole="header" style={[styles.modalTitulo, { flex: 1, marginBottom: 0, color: '#163f30' }]}>Buscar con una foto</Text>
+              <TouchableOpacity disabled={eligiendoEscaner} onPress={() => setOrigenEscanerVisible(false)} accessibilityRole="button" accessibilityLabel="Cerrar escáner" style={[styles.formularioCerrar, { opacity: eligiendoEscaner ? 0.5 : 1 }]}>
+                <Ico n="close" s={24} c="#163f30" />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={{ flexShrink: 1 }} contentContainerStyle={{ paddingBottom: 4 }}>
+              <View style={{ backgroundColor: '#eaf6ef', borderWidth: 1, borderColor: '#d2e8db', borderRadius: 18, padding: 16, marginBottom: 16 }}>
+                <IcoTexto n="scan-outline" s={26} c={PRIMARY_DARK} textoStyle={{ color: '#163f30', fontSize: 17, fontWeight: '700' }}>Encuentra posibles coincidencias</IcoTexto>
+                <Text style={{ color: '#476354', fontSize: 14, lineHeight: 21, marginTop: 8 }}>Elige una foto de la mascota para compararla con los reportes activos que analiza el escáner.</Text>
+              </View>
+              <TouchableOpacity disabled={eligiendoEscaner} onPress={() => { void escanearFoto('camara'); }} accessibilityRole="button"
+                style={[styles.botonGuardar, { minHeight: 48, borderRadius: 14, justifyContent: 'center', marginBottom: 10, opacity: eligiendoEscaner ? 0.5 : 1 }]}>
+                <IcoTexto n="camera-outline" s={22} c="#fff" centrado textoStyle={styles.textoBlanco}>Tomar foto</IcoTexto>
+              </TouchableOpacity>
+              <TouchableOpacity disabled={eligiendoEscaner} onPress={() => { void escanearFoto('galeria'); }} accessibilityRole="button"
+                style={{ minHeight: 48, borderWidth: 1, borderColor: '#cce0d5', backgroundColor: '#fff', borderRadius: 14, justifyContent: 'center', padding: 12, marginBottom: 16, opacity: eligiendoEscaner ? 0.5 : 1 }}>
+                <IcoTexto n="images-outline" s={22} c={PRIMARY_DARK} centrado textoStyle={{ color: PRIMARY_DARK, fontWeight: '700' }}>Subir foto</IcoTexto>
+              </TouchableOpacity>
+              <Text style={{ color: '#244b38', fontSize: 14, fontWeight: '700', marginBottom: 6 }}>Para una mejor comparación</Text>
+              <Text style={{ color: '#596e61', fontSize: 13, lineHeight: 20 }}>Usa buena luz, enfoca a una sola mascota y procura que se vean su cara y su pelaje.</Text>
+              <Text style={{ color: '#596e61', fontSize: 12, lineHeight: 18, marginTop: 12 }}>La IA sugiere parecidos visuales; no confirma la identidad. El análisis puede tardar unos segundos.</Text>
+            </ScrollView>
             <TouchableOpacity disabled={eligiendoEscaner} onPress={() => setOrigenEscanerVisible(false)} accessibilityRole="button"
-              style={{ minHeight: 48, justifyContent: 'center', alignItems: 'center' }}>
+              style={{ minHeight: 44, marginTop: 8, justifyContent: 'center', alignItems: 'center' }}>
               <Text style={{ color: '#555', fontWeight: '600' }}>Cancelar</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={errorEscaner !== null} transparent animationType="fade" onRequestClose={() => { setErrorEscaner(null); fotoEscanerRef.current = null; }}>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContenido, { width: '100%', maxWidth: 420 }]}>
+            <Text accessibilityRole="header" style={styles.modalTitulo}>No se completó el análisis</Text>
+            <Text selectable style={{ color: '#555', lineHeight: 22, marginBottom: 16 }}>{errorEscaner?.mensaje}</Text>
+            {errorEscaner?.reintentar && (
+              <TouchableOpacity accessibilityRole="button" style={styles.botonGuardar} onPress={() => { void escanearFoto('reintentar'); }}>
+                <Text style={styles.textoBlanco}>Reintentar con la misma foto</Text>
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity accessibilityRole="button" style={{ minHeight: 48, justifyContent: 'center', alignItems: 'center' }}
+              onPress={() => { setErrorEscaner(null); fotoEscanerRef.current = null; setOrigenEscanerVisible(true); }}>
+              <Text style={{ color: '#008060', fontWeight: '600' }}>Elegir otra foto</Text>
+            </TouchableOpacity>
+            <TouchableOpacity accessibilityRole="button" style={{ minHeight: 48, justifyContent: 'center', alignItems: 'center' }}
+              onPress={() => { setErrorEscaner(null); fotoEscanerRef.current = null; }}>
+              <Text style={{ color: '#555' }}>Cerrar</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -4393,12 +4774,15 @@ const cambiarGuardado = async (reporteId: string) => {
       {/* Modal: Resultados del escáner */}
       <Modal visible={resultadosVisible} animationType="slide" transparent onRequestClose={() => setResultadosVisible(false)}>
         <View style={styles.modalOverlay}>
-          <View style={[styles.modalContenido, { maxHeight: '85%' }]}>
-            <Text style={styles.modalTitulo}>
+          <View style={[styles.modalContenido, { width: '100%', maxWidth: 520, maxHeight: '90%', borderRadius: 24 }]}>
+            <View style={styles.formularioCabecera}>
+            <Text accessibilityRole="header" style={[styles.modalTitulo, { flex: 1, marginBottom: 0, color: '#163f30' }]}>
               {estadoImagenEscaner === 'sin_mascota' ? 'No detectamos una mascota' : estadoImagenEscaner === 'no_clara' ? 'Prueba con una foto más clara' : 'Posibles coincidencias'}
             </Text>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar resultados del escáner" onPress={() => setResultadosVisible(false)} style={styles.formularioCerrar}><Ico n="close" s={24} c="#163f30" /></TouchableOpacity>
+            </View>
             <ScrollView style={{ flexShrink: 1 }}>
-            <Text style={styles.avisoIa}>{AVISO_IA}</Text>
+            <Text style={[styles.avisoIa, { borderRadius: 14, color: '#476354' }]}>La IA sugiere parecidos; no confirma la identidad. El porcentaje es una estimación, no una probabilidad comprobada. Revisa las fotos y contacta a quien publicó el reporte.</Text>
             {coincidencias.length === 0 ? (
               <Text style={{ color: '#666', marginBottom: 12, lineHeight: 21 }}>
                 {estadoImagenEscaner === 'sin_mascota'
@@ -4416,19 +4800,24 @@ const cambiarGuardado = async (reporteId: string) => {
                 return (
                   <TouchableOpacity accessibilityRole="button"
                     key={c.id}
-                    style={styles.tarjeta}
+                    accessibilityLabel={`Ver reporte de ${rep.nombre || 'mascota sin nombre'}, similitud estimada ${c.similitud}%`}
+                    style={{ borderWidth: 1, borderColor: '#d5e6db', borderRadius: 18, padding: 14, marginBottom: 12, backgroundColor: '#fff' }}
                     onPress={() => {
                       setResultadosVisible(false);
                       setTimeout(() => abrirDetalle(rep), Platform.OS === 'ios' ? 450 : 0);
                     }}
                   >
-                    <Image source={{ uri: rep.foto }} style={styles.tarjetaFoto} />
-                    <View style={styles.tarjetaInfo}>
-                      <Text style={styles.tarjetaNombre}>
-                        {rep.nombre} · Similitud estimada: {c.similitud}%
+                    <View style={{ flexDirection: 'row', gap: 12, alignItems: 'flex-start' }}>
+                    <Image source={{ uri: rep.foto }} resizeMode="contain" accessibilityLabel={`Foto del reporte de ${rep.nombre}`} style={{ width: 80, height: 92, borderRadius: 12, backgroundColor: '#edf5f0' }} />
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={{ color: '#163f30', fontSize: 18, fontWeight: '700', marginBottom: 6 }}>
+                        {rep.nombre || 'Mascota sin nombre'}
                       </Text>
-                      <Text style={styles.tarjetaRaza}>{c.motivo}</Text>
+                      <View style={{ alignSelf: 'flex-start', backgroundColor: '#eaf6ef', borderRadius: 10, paddingHorizontal: 9, paddingVertical: 5, marginBottom: 8 }}><Text style={{ color: PRIMARY_DARK, fontSize: 13, fontWeight: '700' }}>{c.similitud}% · Similitud estimada</Text></View>
+                      <Text style={{ color: '#596e61', fontSize: 13, lineHeight: 19 }}>Observación de la IA: {c.motivo}</Text>
                     </View>
+                    </View>
+                    <View style={{ borderTopWidth: 1, borderTopColor: '#e2ece6', marginTop: 12, paddingTop: 10, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}><Text style={{ color: PRIMARY_DARK, fontWeight: '700' }}>Ver reporte</Text><Ico n="arrow-forward" s={20} c={PRIMARY_DARK} /></View>
                   </TouchableOpacity>
                 );
               })
@@ -4455,66 +4844,85 @@ const cambiarGuardado = async (reporteId: string) => {
             right: 0,
             backgroundColor: 'rgba(0,0,0,0.5)',
             justifyContent: 'center',
+            alignItems: 'center',
+            padding: 20,
           }}
         >
-          <ActivityIndicator size="large" color="#fff" />
-          <Text style={{ color: '#fff', textAlign: 'center', marginTop: 10 }}>Analizando foto…</Text>
+          <View accessibilityViewIsModal style={{ width: '100%', maxWidth: 380, backgroundColor: '#fff', borderRadius: 24, padding: 24, alignItems: 'center', borderWidth: 1, borderColor: '#d3e7db' }}>
+            <View style={{ width: 68, height: 68, borderRadius: 34, backgroundColor: '#e8f5ed', alignItems: 'center', justifyContent: 'center', marginBottom: 16 }}>
+              <ActivityIndicator size="large" color={PRIMARY_DARK} accessibilityLabel="Análisis en curso" />
+            </View>
+            <Text accessibilityLiveRegion="polite" style={{ color: '#163f30', fontSize: 19, fontWeight: '700', textAlign: 'center', marginBottom: 10 }}>{mensajeEscaner}</Text>
+            <Text style={{ color: '#526b5c', fontSize: 14, lineHeight: 21, textAlign: 'center' }}>Estamos procesando tu búsqueda. Mantén esta pantalla abierta hasta recibir el resultado.</Text>
+            <View style={{ alignSelf: 'stretch', backgroundColor: '#f2f8f4', borderRadius: 12, padding: 12, marginTop: 16 }}>
+              <Text style={{ color: '#526b5c', fontSize: 12, lineHeight: 18, textAlign: 'center' }}>El tiempo puede variar según la conexión y la disponibilidad del servicio.</Text>
+            </View>
+          </View>
         </View>
       )}
-    </SafeAreaView>
+    </SafeAreaPantalla>
+    </SafeAreaProvider>
   );
 }
 
 const styles = StyleSheet.create({
+  inicioBienvenida: { backgroundColor: '#e3f3eb', borderRadius: 24, borderWidth: 1, borderColor: '#cce6d8', gap: 18, alignItems: 'stretch' },
+  inicioAntetitulo: { fontSize: 11, fontWeight: '800', letterSpacing: 1.7, color: '#287355', marginBottom: 8 },
+  inicioTitulo: { fontWeight: '800', color: '#123e2d', maxWidth: 650, letterSpacing: -0.7 },
+  inicioDescripcion: { color: '#416653', fontSize: 14, lineHeight: 21, marginTop: 8, maxWidth: 600 },
+  inicioAcciones: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 },
+  inicioBotonPrincipal: { minHeight: 48, paddingHorizontal: 18, paddingVertical: 13, backgroundColor: PRIMARY_DARK, borderRadius: 12, justifyContent: 'center' },
+  inicioBotonSecundario: { minHeight: 48, paddingHorizontal: 18, paddingVertical: 13, backgroundColor: '#fff', borderWidth: 1, borderColor: '#b5d5c2', borderRadius: 12, justifyContent: 'center' },
+  inicioBotonTexto: { fontSize: 14, fontWeight: '700', color: '#fff' },
+  inicioBotonTextoVerde: { fontSize: 14, fontWeight: '700', color: PRIMARY_DARK },
+  inicioEstadisticas: { gap: 8, justifyContent: 'center', flexShrink: 0 },
+  inicioEstadistica: { flexGrow: 1, flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#f8fcfa', borderWidth: 1, borderColor: '#cee4d7', borderRadius: 14, padding: 12, minWidth: 0 },
+  inicioCifra: { fontSize: 24, fontWeight: '800', color: '#174f38' },
+  inicioCifraLabel: { fontSize: 12, lineHeight: 17, color: '#496857' },
+  inicioSeccion: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 12, marginTop: 18, marginBottom: 12 },
+  inicioSeccionTitulo: { fontSize: 23, lineHeight: 29, fontWeight: '800', color: '#193e2d' },
+  inicioSeccionTexto: { fontSize: 14, lineHeight: 21, color: '#607568', marginTop: 5 },
+  inicioEnlaceMapa: { minHeight: 44, paddingHorizontal: 16, paddingVertical: 12, backgroundColor: '#e5f0e9', borderRadius: 24, justifyContent: 'center' },
+  inicioResultadosCabecera: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8, marginTop: 16, marginBottom: 8 },
+  inicioResultadosTexto: { fontSize: 14, fontWeight: '700', color: '#33513f' },
+  inicioOrdenTexto: { fontSize: 12, color: '#607568' },
+  inicioPieTarjeta: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginHorizontal: 18, paddingVertical: 12, borderTopWidth: 1, borderTopColor: '#e7eee9' },
+  inicioFlecha: { width: 32, height: 32, borderRadius: 16, backgroundColor: '#e8f5ee', alignItems: 'center', justifyContent: 'center' },
+
   // Login
-  contenedorLogin: {
-    flex: 1,
-    backgroundColor: PRIMARY_COLOR,
+  contenedorLogin: { flex: 1, backgroundColor: '#eef7f2' },
+  loginContenido: { flexGrow: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 24 },
+  tarjetaLogin: {
+    backgroundColor: '#ffffff', borderRadius: 24, width: '100%', maxWidth: 440,
+    alignItems: 'center', borderWidth: 1, borderColor: '#d5e8df',
+    shadowColor: '#123e30', shadowOpacity: 0.06, shadowRadius: 16,
+    shadowOffset: { width: 0, height: 4 }, elevation: 3,
   },
-  loginContenido: { flexGrow: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
-  passwordFila: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: '#d1d5db', borderRadius: 8, backgroundColor: '#f9f9f9', marginBottom: 12 },
-  passwordCampo: { flex: 1, minWidth: 0, minHeight: 48, padding: 12, fontSize: 14, color: '#222', borderRadius: 8 },
+  loginMarca: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, marginBottom: 18 },
+  logoLogin: { fontSize: 26, fontWeight: '800', color: '#123e30' },
+  loginTitulo: { fontSize: 24, fontWeight: '800', color: '#123e30', textAlign: 'center', marginBottom: 6 },
+  subtituloLogin: { fontSize: 14, lineHeight: 21, color: '#597367', textAlign: 'center', marginBottom: 24 },
+  formContainer: { width: '100%' },
+  labelInput: { fontSize: 14, fontWeight: '600', color: '#315747', marginBottom: 8 },
+  inputLogin: {
+    borderWidth: 1, borderColor: '#cce2d6', backgroundColor: '#f7fbf8',
+    borderRadius: 14, minHeight: 48, padding: 12, marginBottom: 18,
+    fontSize: 16, color: '#243e32',
+  },
+  passwordFila: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: '#cce2d6', borderRadius: 14, backgroundColor: '#f7fbf8', marginBottom: 12 },
+  passwordCampo: { flex: 1, minWidth: 0, minHeight: 48, padding: 12, fontSize: 16, color: '#243e32', borderRadius: 14 },
   passwordBoton: { minHeight: 48, minWidth: 76, paddingHorizontal: 10, alignItems: 'center', justifyContent: 'center', gap: 2 },
   passwordBotonTexto: { fontSize: 11, fontWeight: '600', color: PRIMARY_DARK },
-  passwordAyuda: { padding: 10, backgroundColor: '#e6f8f1', borderRadius: 8, marginBottom: 12 },
-  passwordAyudaTitulo: { fontSize: 13, fontWeight: '700', color: '#0b3d2e', marginBottom: 4 },
+  passwordAyuda: { padding: 12, backgroundColor: '#eaf6ef', borderRadius: 14, marginBottom: 12 },
+  passwordAyudaTitulo: { fontSize: 13, fontWeight: '700', color: '#123e30', marginBottom: 4 },
   passwordAyudaTexto: { fontSize: 13, lineHeight: 19, color: '#334b41' },
-  tarjetaLogin: {
-    backgroundColor: '#ffffff',
-    borderRadius: 16,
-    padding: 30,
-    width: '100%',
-    maxWidth: 400,
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOpacity: 0.1,
-    shadowRadius: 10,
-    elevation: 5,
-  },
-  logoLogin: { fontSize: 32, fontWeight: 'bold', color: PRIMARY_COLOR, marginBottom: 8 },
-  subtituloLogin: { fontSize: 14, color: '#666', textAlign: 'center', marginBottom: 24 },
-  formContainer: { width: '100%' },
-  labelInput: { fontSize: 13, fontWeight: '600', color: '#333', marginBottom: 6 },
-  inputLogin: {
-    borderWidth: 1,
-    borderColor: '#e0e0e0',
-    backgroundColor: '#f9f9f9',
-    borderRadius: 8,
-    padding: 12,
-    marginBottom: 16,
-    fontSize: 14,
-  },
-  botonIngresar: {
-    backgroundColor: PRIMARY_DARK,
-    paddingVertical: 14,
-    borderRadius: 8,
-    alignItems: 'center',
-    marginTop: 8,
-  },
+  botonIngresar: { backgroundColor: PRIMARY_DARK, minHeight: 48, paddingVertical: 14, borderRadius: 14, alignItems: 'center', justifyContent: 'center', marginTop: 4 },
   textoBotonIngresar: { color: '#ffffff', fontWeight: 'bold', fontSize: 16 },
+  loginEnlace: { minHeight: 44, justifyContent: 'center', alignItems: 'center', marginTop: 8 },
+  loginPrivacidad: { minHeight: 44, justifyContent: 'center', alignItems: 'center', marginTop: 4 },
 
   // Dashboard
-  contenedorPrincipal: { flex: 1, backgroundColor: '#f4f7f6' },
+  contenedorPrincipal: { flex: 1, backgroundColor: '#f5f8f6' },
 
   navbar: {
     backgroundColor: '#ffffff',
@@ -4535,8 +4943,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  navbarTitulo: { fontWeight: 'bold', fontSize: 17, color: '#222' },
-  navbarSubtitulo: { fontSize: 10, color: '#6b6b6b', letterSpacing: 0.5 },
+  navbarTitulo: { fontWeight: '800', fontSize: 21, color: '#123e30' },
+  navbarSubtitulo: { fontSize: 10, color: '#597367', letterSpacing: 0.8 },
   navbarAcciones: { flexDirection: 'row', flexGrow: 0 },
   navbarBoton: {
     backgroundColor: '#e6f9f2',
@@ -4612,15 +5020,7 @@ const styles = StyleSheet.create({
 
   contenido: { flex: 1 },
 
-  panelFiltros: {
-    backgroundColor: '#fff',
-    borderRadius: 14,
-    padding: 16,
-    shadowColor: '#000',
-    shadowOpacity: 0.05,
-    shadowRadius: 6,
-    elevation: 2,
-  },
+  panelFiltros: { backgroundColor: '#fff', borderRadius: 20, padding: 14, borderWidth: 1, borderColor: '#dfe9e3' },
   filtrosHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -4631,24 +5031,11 @@ const styles = StyleSheet.create({
   filtrosLimpiar: { color: PRIMARY_DARK, fontWeight: '600', fontSize: 13 },
   filtrosLabel: { fontSize: 11, color: '#6b6b6b', fontWeight: '700', marginTop: 10, marginBottom: 6 },
   filtrosFila: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  chipFiltro: {
-    borderWidth: 1,
-    borderColor: '#ddd',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-  },
+  chipFiltro: { minHeight: 44, justifyContent: 'center', borderWidth: 1, borderColor: '#d5e3da', backgroundColor: '#fff', paddingHorizontal: 10, paddingVertical: 10, borderRadius: 24 },
   chipFiltroActivo: { backgroundColor: PRIMARY_DARK, borderColor: PRIMARY_DARK },
-  chipFiltroTexto: { color: '#555', fontSize: 12, fontWeight: '600' },
+  chipFiltroTexto: { color: '#496457', fontSize: 13, fontWeight: '600' },
   chipFiltroTextoActivo: { color: '#fff' },
-  buscador: {
-    marginTop: 12,
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 8,
-    padding: 10,
-    fontSize: 13,
-  },
+  buscador: { marginTop: 12, minHeight: 52, borderWidth: 1, borderColor: '#d4e2d9', backgroundColor: '#f7faf8', borderRadius: 12, padding: 14, fontSize: 15, color: '#183e2e' },
 
   tarjetaCuadro: {
     flexDirection: 'row',
@@ -4659,29 +5046,17 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#eee',
   },
-  tarjetaVertical: {
-    flex: 1,
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#eee',
-    overflow: 'hidden',
-  },
-  tarjetaFotoGrande: { width: '100%', aspectRatio: 1.6, backgroundColor: '#eef2ef' },
-  reporteDatos: { padding: 14, gap: 5, minWidth: 0 },
-  reporteNombre: { fontWeight: '700', fontSize: 20, lineHeight: 26, color: '#222' },
-  reporteRaza: { fontSize: 15, lineHeight: 21, color: '#4b5563' },
-  reporteMeta: { fontSize: 14, lineHeight: 20, color: '#555f5b' },
-  navLink: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8 },
+  tarjetaVertical: { flex: 1, backgroundColor: '#fff', borderRadius: 20, borderWidth: 1, borderColor: '#dce7df', overflow: 'hidden' },
+  tarjetaFotoGrande: { width: '100%', aspectRatio: 1.45, backgroundColor: '#eaf0ec' },
+  reporteDatos: { padding: 16, gap: 6, minWidth: 0 },
+  reporteNombre: { fontWeight: '800', fontSize: 20, lineHeight: 26, color: '#173e2f' },
+  reporteRaza: { fontSize: 13, lineHeight: 19, color: '#5e7366', marginBottom: 4 },
+  reporteMeta: { fontSize: 13, lineHeight: 20, color: '#52675c' },
+  navLink: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 22 },
   navLinkActivo: { backgroundColor: '#e6f8f1' },
   navLinkTexto: { fontSize: 14, fontWeight: '600', color: '#555' },
   navLinkTextoActivo: { color: PRIMARY_DARK },
-  navBotonPrincipal: {
-    backgroundColor: PRIMARY_DARK,
-    paddingHorizontal: 16,
-    paddingVertical: 9,
-    borderRadius: 20,
-  },
+  navBotonPrincipal: { minHeight: 44, justifyContent: 'center', backgroundColor: PRIMARY_DARK, paddingHorizontal: 18, paddingVertical: 10, borderRadius: 24 },
   tarjeta: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -4712,20 +5087,23 @@ const styles = StyleSheet.create({
   leyendaDot: { width: 10, height: 10, borderRadius: 5 },
   leyendaTexto: { fontSize: 12, color: '#666' },
 
-  perfilPanel: { backgroundColor: '#fff', borderRadius: 16, width: '100%', maxWidth: 640, maxHeight: '92%', flexShrink: 1, overflow: 'hidden' },
-  perfilCabecera: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 16, borderBottomWidth: 1, borderBottomColor: '#e5ebe7' },
-  perfilCuenta: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, backgroundColor: '#edf6f0', borderRadius: 12, marginBottom: 22 },
+  perfilAvatar: { width: 48, height: 48, borderRadius: 24, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },
+  perfilIconoVacio: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#e6f3eb', alignItems: 'center', justifyContent: 'center' },
+  perfilNota: { fontSize: 12, lineHeight: 18, marginBottom: 16, padding: 12, backgroundColor: '#f5f8f6', borderRadius: 12 },
+  perfilPanel: { backgroundColor: '#fff', borderRadius: 24, width: '100%', maxWidth: 640, maxHeight: '92%', flexShrink: 1, overflow: 'hidden' },
+  perfilCabecera: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10, paddingHorizontal: 18, borderBottomWidth: 1, borderBottomColor: '#e5ebe7' },
+  perfilCuenta: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 16, backgroundColor: '#e8f5ee', borderWidth: 1, borderColor: '#cee7d9', borderRadius: 18, marginBottom: 18 },
   perfilNombre: { fontSize: 17, fontWeight: '700', color: '#22372b' },
   perfilTexto: { fontSize: 14, lineHeight: 21, color: '#59645d' },
   perfilPestanas: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 14 },
-  perfilPestana: { flexGrow: 1, paddingHorizontal: 10, paddingVertical: 13, borderRadius: 10, backgroundColor: '#edf3ef' },
-  perfilPestanaActiva: { backgroundColor: PRIMARY_DARK },
-  perfilVacio: { alignItems: 'center', paddingVertical: 28, paddingHorizontal: 10 },
-  perfilReporte: { borderWidth: 1, borderColor: '#e1e8e3', borderRadius: 12, padding: 12, marginBottom: 12 },
+  perfilPestana: { flexGrow: 1, minHeight: 44, justifyContent: 'center', paddingHorizontal: 10, paddingVertical: 11, borderWidth: 1, borderColor: '#d5e5db', borderRadius: 14, backgroundColor: '#f5faf7' },
+  perfilPestanaActiva: { backgroundColor: PRIMARY_DARK, borderColor: PRIMARY_DARK },
+  perfilVacio: { alignItems: 'center', paddingVertical: 18, paddingHorizontal: 16, backgroundColor: '#f7faf8', borderRadius: 18, borderWidth: 1, borderColor: '#e0ebe4', marginBottom: 14 },
+  perfilReporte: { borderWidth: 1, borderColor: '#d9e7df', borderRadius: 18, padding: 14, marginBottom: 12, backgroundColor: '#fff' },
   perfilAcciones: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 },
-  perfilAccion: { paddingHorizontal: 12, paddingVertical: 12, backgroundColor: '#f2f5f3', borderRadius: 8 },
+  perfilAccion: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 14, paddingVertical: 10, backgroundColor: '#edf7f1', borderRadius: 12 },
   perfilAccionTexto: { fontSize: 14, fontWeight: '700', color: PRIMARY_DARK },
-  perfilEnlace: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 14, borderWidth: 1, borderColor: '#dfe7e2', borderRadius: 10 },
+  perfilEnlace: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 48, padding: 12, borderWidth: 1, borderColor: '#dfe7e2', borderRadius: 14 },
 
   // Modales (reutilizados)
   modalOverlay: {
@@ -4765,7 +5143,7 @@ const styles = StyleSheet.create({
   selectorTitulo: { flex: 1, fontSize: 18, fontWeight: '700', color: '#222' },
   selectorAyuda: { paddingHorizontal: 16, paddingTop: 10, paddingBottom: 8 },
   selectorCentrar: { flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 44, paddingVertical: 8 },
-  selectorPie: { padding: 16, borderTopWidth: 1, borderTopColor: '#e3e8e5', backgroundColor: '#fff' },
+  selectorPie: { flexShrink: 0, padding: 16, borderTopWidth: 1, borderTopColor: '#e3e8e5', backgroundColor: '#fff' },
   selectorCancelar: { flex: 1, minHeight: 48, borderWidth: 1, borderColor: '#c9d3cc', borderRadius: 10, alignItems: 'center', justifyContent: 'center', padding: 10 },
   selectorConfirmar: { flex: 1.4, minHeight: 48, backgroundColor: PRIMARY_DARK, borderRadius: 10, alignItems: 'center', justifyContent: 'center', padding: 10 },
   avisoBorrador: { position: 'absolute', alignSelf: 'center', maxWidth: '90%', paddingHorizontal: 18, paddingVertical: 12, borderRadius: 12, backgroundColor: '#263c32', zIndex: 1000, elevation: 8 },
@@ -4806,9 +5184,9 @@ const styles = StyleSheet.create({
     paddingTop: 6,
     paddingBottom: 8,
   },
-  tabItem: { flex: 1, minHeight: 48, alignItems: 'center', justifyContent: 'center', paddingVertical: 4, gap: 2 },
+  tabItem: { flex: 1, minHeight: 48, alignItems: 'center', justifyContent: 'center', paddingVertical: 4, paddingHorizontal: 2, gap: 3 },
   tabIcono: { fontSize: 20 },
-  tabTexto: { fontSize: 12, color: '#6b6b6b', fontWeight: '600' },
+  tabTexto: { textAlign: 'center', fontSize: 11, color: '#6b6b6b', fontWeight: '600' },
   tabTextoActivo: { color: PRIMARY_DARK, fontWeight: '700' },
   tabReportar: {
     width: 30,
@@ -4818,15 +5196,35 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  publicarPanel: { width: '100%', maxWidth: 680, borderRadius: 24, backgroundColor: '#fff' },
+  publicarProgreso: { paddingHorizontal: 12, paddingVertical: 9, marginBottom: 8, borderRadius: 12, backgroundColor: '#eaf6ef', borderWidth: 1, borderColor: '#d1e8db' },
+  publicarIntroduccion: { fontSize: 15, lineHeight: 22, color: '#345c48', marginBottom: 6 },
+  publicarEtiqueta: { fontSize: 14, lineHeight: 20, fontWeight: '600', color: '#244b38', marginBottom: 7, marginTop: 6 },
+  publicarInput: { minHeight: 44, borderWidth: 1, borderColor: '#cfdfd5', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, marginBottom: 10, backgroundColor: '#f8fbf9', color: '#243c30', fontSize: 14 },
+  publicarOpcion: { flex: 1, minHeight: 44, padding: 10, justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#cfdfd5', borderRadius: 12, backgroundColor: '#fff' },
+  publicarChip: { minHeight: 44, paddingHorizontal: 14, paddingVertical: 10, justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#cfdfd5', borderRadius: 22, backgroundColor: '#fff' },
+  publicarFecha: { minHeight: 44, minWidth: 80, paddingHorizontal: 12, paddingVertical: 10, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#cfdfd5', borderRadius: 22, backgroundColor: '#fff' },
+  publicarSeccion: { fontSize: 16, fontWeight: '700', color: '#163f30', marginTop: 14, marginBottom: 10, paddingTop: 12, borderTopWidth: 1, borderTopColor: '#e0ebe5' },
+  publicarRevision: { borderWidth: 1, borderColor: '#cfe5d8', backgroundColor: '#f3faf6', borderRadius: 18, padding: 16, marginTop: 6, marginBottom: 12 },
+  detalleContenido: { padding: 18, paddingBottom: 24, gap: 18 },
+  detalleResumen: { gap: 22, alignItems: 'stretch' },
+  detalleMarcoFoto: { borderRadius: 20, backgroundColor: '#edf3ef', overflow: 'hidden', alignSelf: 'flex-start' },
+  detalleDatosResumen: { minWidth: 0 },
+  detalleSeguimiento: { padding: 16, borderWidth: 1, borderColor: '#dce9e2', backgroundColor: '#f7faf8', borderRadius: 18 },
+  detalleTituloSeccion: { fontSize: 17, fontWeight: '700', color: '#163f30', marginBottom: 12 },
+  detalleAtajos: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 10 },
+  detalleAtajo: { flexGrow: 1, flexBasis: 180 },
+  detalleAccionSuave: { minHeight: 46, paddingVertical: 11, paddingHorizontal: 12, borderRadius: 12, borderWidth: 1, borderColor: '#cce3d7', backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },
+  detalleUbicacion: { gap: 4 },
   detalleFondo: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.45)' },
-  detallePanel: { flex: 1, width: '100%', maxWidth: 900, backgroundColor: '#fff', overflow: 'hidden' },
+  detallePanel: { flex: 1, width: '100%', maxWidth: 1000, backgroundColor: '#fff', overflow: 'hidden' },
   detalleCabecera: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 8, paddingHorizontal: 18, borderBottomWidth: 1, borderBottomColor: '#eee' },
   detalleFoto: { width: '100%', height: 300, backgroundColor: '#eef2ef' },
   detalleCerrar: {
     width: 44, height: 44, borderRadius: 22,
     backgroundColor: '#f1f4f2', alignItems: 'center', justifyContent: 'center',
   },
-  detalleNombre: { fontSize: 26, fontWeight: 'bold', color: '#222', flex: 1, marginRight: 10 },
+  detalleNombre: { fontSize: 26, fontWeight: 'bold', color: '#163f30', flex: 1, marginRight: 10 },
   detalleRecompensa: {
     backgroundColor: '#fff4d6',
     borderRadius: 8,
@@ -4845,6 +5243,6 @@ const styles = StyleSheet.create({
     borderTopColor: '#eee',
     backgroundColor: '#fff',
   },
-  detalleBoton: { flex: 1, paddingVertical: 14, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  detalleBoton: { flex: 1, minHeight: 46, paddingHorizontal: 10, paddingVertical: 11, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
   detalleBotonTexto: { color: '#fff', fontWeight: 'bold', fontSize: 14, textAlign: 'center' },
 });
